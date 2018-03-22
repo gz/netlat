@@ -1,0 +1,7 @@
+[package]
+name = "netlat"
+version = "0.1.0"
+authors = ["Gerd Zellweger <mail@gerdzellweger.com>"]
+
+[dependencies]
+mio = "0.6"
