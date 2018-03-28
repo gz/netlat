@@ -4,4 +4,9 @@ version = "0.1.0"
 authors = ["Gerd Zellweger <mail@gerdzellweger.com>"]
 
 [dependencies]
-mio = "0.6"
+mio = "*"
+time = "0.1"
+byteorder = "*"
+csv = "1.0.0-beta.5"
+serde_derive = "*"
+serde = "*"
