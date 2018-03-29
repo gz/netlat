@@ -9,9 +9,6 @@ from matplotlib import pyplot as plt, font_manager
 import numpy as np
 import pandas as pd
 
-#ticks_font = font_manager.FontProperties(family='Decima Mono')
-#plt.style.use([os.path.join(sys.path[0], '../ethplot.mplstyle')])
-
 if __name__ == '__main__':
 
     f = sys.argv[1]
@@ -23,6 +20,13 @@ if __name__ == '__main__':
     series[len(series)] = series.iloc[-1]
     cum_dist = np.linspace(0.,1.,len(series))
     cdf = pd.Series(cum_dist, index=series)
+
+    print ("Samples", len(series))
+    print ("50 percentile", np.percentile(series, 50))
+    print ("95 percentile", np.percentile(series, 95))
+    print ("99 percentile", np.percentile(series, 99))
+    print ("99.9 percentile", np.percentile(series, 99.9))
+    print ("100 percentile", np.percentile(series, 100))
 
     fig = plt.figure()
     ax1 = fig.add_subplot(1, 1, 1)

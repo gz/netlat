@@ -74,6 +74,9 @@ fn main() {
             wtr.flush().expect("Can't flush the csv log");
         }
 
+        if i == 250000 {
+            break;
+        }
     }
 
 }
