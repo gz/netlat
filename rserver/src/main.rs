@@ -88,5 +88,5 @@ fn main() {
         socket.try_clone().expect("Can't clone this."),
     );
     tapp.join().expect("Can't join app-thread.");
-    tpoll.join().expect("Can't join poll-thread.")
+    tpoll.join().expect("Can't join poll-2thread.")
 }
