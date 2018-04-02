@@ -21,7 +21,7 @@ if __name__ == '__main__':
     ax1.get_xaxis().tick_bottom()
     ax1.get_yaxis().tick_left()
 
-    for f in sys.argv:
+    for f in sys.argv[1:]:
         filename, file_extension = os.path.splitext(os.path.basename(f))
 
         raw_data = pd.read_csv(f, skipinitialspace=True)
