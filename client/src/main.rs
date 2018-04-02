@@ -28,7 +28,8 @@ const PING: Token = Token(0);
 fn main() {
 
     let args: Vec<String> = env::args().collect();
-    assert!(args.len() >= 2);
+    assert!(args.len() >= 3);
+    
     println!("Connecting to {}", args[1]);
     let sender = UdpSocket::bind(&"0.0.0.0:1111".parse().expect("Invalid address.")).expect("Can't bind");
 
@@ -43,7 +44,7 @@ fn main() {
     let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
     recv_buf.resize(8, 0);
 
-    let mut wtr = Writer::from_path("latency.csv").expect("Can't open log file for writing");
+    let mut wtr = Writer::from_path(args[2].clone()).expect("Can't open log file for writing");
     
     let mut i = 0;
     let mut waiting_for_reply = false;
