@@ -44,5 +44,5 @@ if __name__ == '__main__':
         #plt.setp(ax1.get_xticklabels(), fontproperties=ticks_font)
         #plt.setp(ax1.get_yticklabels(), fontproperties=ticks_font)
 
-        plt.savefig(os.path.join(filename + ".png"), format='png', pad_inches=0.0)
-        plt.savefig(os.path.join(filename + ".pdf"), format='pdf', pad_inches=0.0)
+        plt.savefig("plot-cdf-latency.png"), format='png', pad_inches=0.0)
+        plt.savefig("plot-cdf-latency.pdf"), format='pdf', pad_inches=0.0)
