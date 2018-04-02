@@ -38,11 +38,12 @@ if __name__ == '__main__':
         print ("99.9 percentile", np.percentile(series, 99.9))
         print ("100 percentile", np.percentile(series, 100))
 
-        p = ax1.plot(cdf, label=f)
+        p = ax1.plot(cdf, label=filename.split("-")[1])
 
-        ax1.get_xaxis().get_major_formatter().set_useOffset(False)
-        #plt.setp(ax1.get_xticklabels(), fontproperties=ticks_font)
-        #plt.setp(ax1.get_yticklabels(), fontproperties=ticks_font)
+    ax1.get_xaxis().get_major_formatter().set_useOffset(False)
+    #plt.setp(ax1.get_xticklabels(), fontproperties=ticks_font)
+    #plt.setp(ax1.get_yticklabels(), fontproperties=ticks_font)
 
-        plt.savefig("plot-cdf-latency.png", format='png', pad_inches=0.0)
-        plt.savefig("plot-cdf-latency.pdf", format='pdf', pad_inches=0.0)
+    plt.legend()
+    plt.savefig("plot-cdf-latency.png", format='png', pad_inches=0.0)
+    plt.savefig("plot-cdf-latency.pdf", format='pdf', pad_inches=0.0)
