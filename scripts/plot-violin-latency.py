@@ -11,7 +11,7 @@ import pandas as pd
 
 if __name__ == '__main__':
 
-    fig, axes = plt.subplots(nrows=int(len(sys.argv)-1/3), ncols=3, figsize=(10,10))
+    fig, axes = plt.subplots(nrows=int((len(sys.argv)-1)/3), ncols=3, figsize=(10,10))
 
     for i, f in enumerate(sys.argv[1:]):
         filename, file_extension = os.path.splitext(os.path.basename(f))
