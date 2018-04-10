@@ -64,21 +64,20 @@ fn main() {
                 let _ = sender.recv_from(&mut recv_buf).expect("Can't receive timestamp back.");
                 let now = time::precise_time_ns();
                 let sent = recv_buf.as_slice().read_u64::<BigEndian>().expect("Can't parse timestamp");
-
+                
+                
                 wtr.serialize(Row { latency_ns: now-sent }).expect("Can't write record");
+                i = i + 1;
                 waiting_for_reply = false;
             }
         }
 
-        i = i + 1;
         if i % 10000 == 0 {
             wtr.flush().expect("Can't flush the csv log");
         }
 
-        if i == 250000 {
+        if i == 250000-1 {
             break;
         }
     }
-
-    wtr.flush().expect("Can't flush the csv log");
 }
