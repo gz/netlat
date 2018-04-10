@@ -80,4 +80,5 @@ fn main() {
         }
     }
 
+    wtr.flush().expect("Can't flush the csv log");
 }
