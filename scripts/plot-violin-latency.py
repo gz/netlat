@@ -36,7 +36,9 @@ if __name__ == '__main__':
 
         axes[int(i/3), i%3].violinplot(rseries, points=20, widths=0.1, showmeans=True, showextrema=True, showmedians=True)
         axes[int(i/3), i%3].set_title(filename.split("-")[1])
-    
+        axes[int(i/3), i%3].set_yscale("log", nonposy='clip')
+
+
     for (m,n), subplot in numpy.ndenumerate(axes):
         subplot.set_ylim(min_all,max_all)
 

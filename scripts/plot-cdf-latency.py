@@ -43,6 +43,8 @@ if __name__ == '__main__':
     ax1.get_xaxis().get_major_formatter().set_useOffset(False)
     #plt.setp(ax1.get_xticklabels(), fontproperties=ticks_font)
     #plt.setp(ax1.get_yticklabels(), fontproperties=ticks_font)
+    
+    ax1.set_xscale("log", nonposx='clip')
 
     plt.legend()
     plt.savefig("plot-cdf-latency.png", format='png', pad_inches=0.0)
