@@ -12,7 +12,7 @@ import math
 
 if __name__ == '__main__':
 
-    fig, axes = plt.subplots(nrows=math.floor(len(sys.argv) / 3)+1, ncols=3, figsize=(14,14))
+    fig, axes = plt.subplots(nrows=math.ceil(len(sys.argv) / 3), ncols=3, figsize=(18,18))
     min_all = 10**10
     max_all = 0
 
@@ -22,18 +22,20 @@ if __name__ == '__main__':
         raw_data = pd.read_csv(f, skipinitialspace=True)
         series = raw_data['latency_ns']
         rseries = pd.Series(series)
-        if min_all > rseries.min():
-            min_all = rseries.min()
-        if max_all < rseries.max():
-            max_all = rseries.max()
 
-        axes[int(i/3), i%3].set_ylabel('Latency [ns]')
+        axes[int(i/3), i%3].set_ylabel('Latency [us]')
         axes[int(i/3), i%3].set_xlabel('')
 
         axes[int(i/3), i%3].spines['top'].set_visible(False)
         axes[int(i/3), i%3].spines['right'].set_visible(False)
         axes[int(i/3), i%3].get_xaxis().tick_bottom()
         axes[int(i/3), i%3].get_yaxis().tick_left()
+        
+        rseries = rseries.map(lambda x: x / 1000.0) # Convert ns to us
+        if min_all > rseries.min():
+            min_all = rseries.min()
+        if max_all < rseries.max():
+            max_all = rseries.max()
 
         axes[int(i/3), i%3].violinplot(rseries, points=20, widths=0.1, showmeans=True, showextrema=True, showmedians=True)
         axes[int(i/3), i%3].set_title(filename.split("-")[1])
