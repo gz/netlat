@@ -24,15 +24,15 @@ struct Row {
 }
 
 const PING: Token = Token(0);
-const MAX_EVENTS: u64 = 250000;
 
 fn main() {
 
     let args: Vec<String> = env::args().collect();
     assert!(args.len() >= 3);
     
-    println!("Connecting to {}", args[1]);
+    println!("Sending {} requests to {}", args[1], args[2]);
     let sender = UdpSocket::bind(&"0.0.0.0:1111".parse().expect("Invalid address.")).expect("Can't bind");
+    let requests = args[1].parse::<u64>().expect("First argument should be request count (u64).");
 
     sender.connect(args[1].parse().expect("Invalid host:port pair")).expect("Can't connect to server");
     let poll = Poll::new().expect("Can't create poll.");
@@ -78,7 +78,7 @@ fn main() {
             wtr.flush().expect("Can't flush the csv log");
         }
 
-        if i == MAX_EVENTS-1 {
+        if i == requests-1 {
             break;
         }
     }
