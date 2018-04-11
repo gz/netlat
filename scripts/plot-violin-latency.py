@@ -8,15 +8,18 @@ from matplotlib import pyplot as plt, font_manager
 
 import numpy as np
 import pandas as pd
+import math
 
 if __name__ == '__main__':
 
-    fig, axes = plt.subplots(nrows=int( (len(sys.argv))/3), ncols=4, figsize=(10,10))
-
+    fig, axes = plt.subplots(nrows=math.ceil(len(sys.argv) / 3)+1, ncols=3, figsize=(14,14))
+    print (math.ceil(len(sys.argv) / 3), 3)
     min_all = 10**10
     max_all = 0
 
     for i, f in enumerate(sys.argv[1:]):
+        print(i, int(i/3), i%3)
+
         filename, file_extension = os.path.splitext(os.path.basename(f))
         raw_data = pd.read_csv(f, skipinitialspace=True)
         series = raw_data['latency_ns']
