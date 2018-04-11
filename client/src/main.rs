@@ -28,13 +28,13 @@ const PING: Token = Token(0);
 fn main() {
 
     let args: Vec<String> = env::args().collect();
-    assert!(args.len() >= 3);
-    
-    println!("Sending {} requests to {}", args[1], args[2]);
+    assert!(args.len() >= 4);
+    println!("Sending {} requests to {} writing latencies to {}", args[1], args[2], args[3]);
+
     let sender = UdpSocket::bind(&"0.0.0.0:1111".parse().expect("Invalid address.")).expect("Can't bind");
     let requests = args[1].parse::<u64>().expect("First argument should be request count (u64).");
 
-    sender.connect(args[1].parse().expect("Invalid host:port pair")).expect("Can't connect to server");
+    sender.connect(args[2].parse().expect("Invalid host:port pair")).expect("Can't connect to server");
     let poll = Poll::new().expect("Can't create poll.");
 
     poll.register(&sender, PING, Ready::writable() | Ready::readable(), PollOpt::level()).expect("Can't register send event.");
@@ -45,7 +45,7 @@ fn main() {
     let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
     recv_buf.resize(8, 0);
 
-    let mut wtr = Writer::from_path(args[2].clone()).expect("Can't open log file for writing");
+    let mut wtr = Writer::from_path(args[3].clone()).expect("Can't open log file for writing");
     
     let mut i = 0;
     let mut waiting_for_reply = false;
