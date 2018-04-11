@@ -11,7 +11,7 @@ import pandas as pd
 
 if __name__ == '__main__':
 
-    fig, axes = plt.subplots(nrows=int( (len(sys.argv))/3), ncols=3, figsize=(10,10))
+    fig, axes = plt.subplots(nrows=int( (len(sys.argv))/3), ncols=4, figsize=(10,10))
 
     min_all = 10**10
     max_all = 0
