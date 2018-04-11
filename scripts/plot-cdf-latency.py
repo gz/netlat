@@ -14,7 +14,7 @@ if __name__ == '__main__':
     fig = plt.figure()
     ax1 = fig.add_subplot(1, 1, 1)
     ax1.set_ylabel('CDF [%]')
-    ax1.set_xlabel('Latency [ns]')
+    ax1.set_xlabel('Latency [us]')
 
     ax1.spines['top'].set_visible(False)
     ax1.spines['right'].set_visible(False)
@@ -26,6 +26,7 @@ if __name__ == '__main__':
 
         raw_data = pd.read_csv(f, skipinitialspace=True)
         series = raw_data['latency_ns']
+        series = series.map(lambda x: x / 1000)
         series = series.sort_values()
         series[len(series)] = series.iloc[-1]
         cum_dist = np.linspace(0.,1.,len(series))

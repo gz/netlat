@@ -37,13 +37,16 @@ if __name__ == '__main__':
         if max_all < rseries.max():
             max_all = rseries.max()
 
-        axes[int(i/3), i%3].violinplot(rseries, points=20, widths=0.1, showmeans=True, showextrema=True, showmedians=True)
+        r = axes[int(i/3), i%3].violinplot(rseries, points=20, widths=0.1, showmeans=True, showextrema=True, showmedians=True)
+        r['cmeans'].set_color('b')
+        r['cmedians'].set_color('r')
+
         axes[int(i/3), i%3].set_title(filename.split("-")[1])
         axes[int(i/3), i%3].set_yscale("log", nonposy='clip')
 
 
-    for (m,n), subplot in numpy.ndenumerate(axes):
-        subplot.set_ylim(min_all,max_all)
+    #for (m,n), subplot in numpy.ndenumerate(axes):
+    #    subplot.set_ylim(min_all,max_all)
 
     plt.legend()
     plt.subplots_adjust(left=None, bottom=None, right=None, top=None, wspace=0.40, hspace=0.2)
