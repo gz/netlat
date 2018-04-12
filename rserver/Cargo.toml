@@ -3,4 +3,16 @@ name = "rserver"
 version = "0.1.0"
 authors = ["Gerd Zellweger <mail@gerdzellweger.com>"]
 
+[[bin]]
+name = "rserver"
+path = "src/rserver.rs"
+
+[[bin]]
+name = "rserver2"
+path = "src/rserver2.rs"
+
+#[[bin]]
+#name = "rhyperserver"
+#path = "rhyperserver.rs"
+
 [dependencies]
