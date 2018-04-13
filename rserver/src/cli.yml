@@ -1,0 +1,28 @@
+name: Echo server
+version: "1.0"
+author: Gerd Zellweger <mail@gerdzellweger.com>
+about: Replies to stuff...
+args:
+    - verbose:
+        short: v
+        multiple: true
+        help: Sets the level of verbosity
+subcommands:
+    - smtconfig:
+        about: Run epoll and app logic on seperate hyperthreads.
+        args:
+            - pin:
+                help: Which core to pin the threads on.
+                required: true
+            - port:
+                help: What port to listen on?
+                required: false
+    - single:
+        about: Run epoll on a single core.
+        args:
+            - pin:
+                help: Which core to pin the process on.
+                required: true
+            - port:
+                help: What port to listen on?
+                required: false

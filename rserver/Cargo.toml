@@ -3,16 +3,9 @@ name = "rserver"
 version = "0.1.0"
 authors = ["Gerd Zellweger <mail@gerdzellweger.com>"]
 
-[[bin]]
-name = "rserver"
-path = "src/rserver.rs"
-
-[[bin]]
-name = "rserver2"
-path = "src/rserver2.rs"
-
-#[[bin]]
-#name = "rhyperserver"
-#path = "rhyperserver.rs"
-
 [dependencies]
+clap = {version = "2.31", features = ["yaml"]}
+nix = "0.10.0"
+hwloc = "0.5.0"
+log = { version = "0.4", features = ["max_level_debug", "release_max_level_warn"] }
+env_logger = "*"
