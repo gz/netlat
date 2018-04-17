@@ -1,23 +1,56 @@
 #[macro_use]
 extern crate clap;
-extern crate nix;
 extern crate hwloc;
+extern crate nix;
 #[macro_use]
 extern crate log;
 extern crate env_logger;
 
 use std::net::UdpSocket;
-use std::thread;
-use std::sync::mpsc::channel;
 use std::ops::Add;
 use std::str::FromStr;
+use std::sync::mpsc::channel;
+use std::thread;
 
-use nix::sched::{CpuSet, sched_setaffinity};
-use nix::unistd::getpid;
-
-use hwloc::{Topology, ObjectType};
+use hwloc::{ObjectType, Topology};
 
 use clap::App;
+
+#[cfg(target_os = "linux")]
+fn pin_thread(core_id: usize) {
+    use nix::unistd::getpid;
+    use nix::sched::{sched_setaffinity, CpuSet};
+
+    let pid = getpid();
+    let mut affinity_set = CpuSet::new();
+    affinity_set.set(core_id).expect("Can't set PU in core set");
+    sched_setaffinity(pid, &affinity_set).expect("Can't pin app thread to core");
+}
+
+#[cfg(target_os = "linux")]
+fn pin_thread2(core_id: usize, core_id2: usize) {
+    use nix::unistd::getpid;
+    use nix::sched::{sched_setaffinity, CpuSet};
+
+    let pid = getpid();
+    let mut affinity_set = CpuSet::new();
+    affinity_set.set(core_id).expect("Can't set PU in core set");
+    affinity_set.set(core_id2).expect("Can't set PU in core set");
+    
+    sched_setaffinity(pid, &affinity_set).expect("Can't pin app thread to core");
+}
+
+// And this function only gets compiled if the target OS is *not* linux
+#[cfg(not(target_os = "linux"))]
+fn pin_thread(_core_id: usize) {
+    error!("Pinning threads not supported!");
+}
+
+// And this function only gets compiled if the target OS is *not* linux
+#[cfg(not(target_os = "linux"))]
+fn pin_thread2(_core_id: usize, _core_id2: usize) {
+    error!("Pinning threads not supported!");
+}
 
 enum Message {
     Payload([u8; 8]),
@@ -26,7 +59,7 @@ enum Message {
 
 fn spawn_listen_pair(
     name: String,
-    on_core: (usize, usize),
+    on_core: Option<(usize, usize)>,
     socket: UdpSocket,
 ) -> (thread::JoinHandle<()>, thread::JoinHandle<()>) {
     let (txa, rxp) = channel();
@@ -38,11 +71,10 @@ fn spawn_listen_pair(
         .name(t_app_name)
         .stack_size(4096 * 10)
         .spawn(move || loop {
-            let pid = getpid();
-
-            let mut affinity_set = CpuSet::new();
-            affinity_set.set(on_core.0).expect("Can't set PU in core set");
-            sched_setaffinity(pid, &affinity_set).expect("Can't pin app thread to core");
+           
+            on_core.map(|ids: (usize, usize)| {
+                pin_thread(ids.0);
+            });
 
             match rxa.recv().expect("Can't receive data on app thread") {
                 Message::Payload(buf_app) => {
@@ -71,11 +103,10 @@ fn spawn_listen_pair(
         .name(t_poll_name)
         .stack_size(4096 * 10)
         .spawn(move || {
-            let pid = getpid();
 
-            let mut affinity_set = CpuSet::new();
-            affinity_set.set(on_core.1).expect("Can't set PU in core set");
-            sched_setaffinity(pid, &affinity_set).expect("Can't pin poll thread to core");
+            on_core.map(|ids: (usize, usize)| {
+                pin_thread(ids.1);
+            });
 
             loop {
                 let mut buf_network: [u8; 8] = [0; 8];
@@ -102,8 +133,11 @@ fn spawn_listen_pair(
     (t_app, t_poll)
 }
 
-fn parse_args(matches: &clap::ArgMatches) -> ((usize, usize), String, UdpSocket) {
-    let core_id: u32 = u32::from_str(matches.value_of("pin").unwrap_or("0")).unwrap_or(0);
+fn parse_args(matches: &clap::ArgMatches) -> (Option<(usize, usize)>, String, UdpSocket) {
+    let core_id: Option<u32> = matches
+        .value_of("pin")
+        .and_then(|c: &str| u32::from_str(c).ok());
+
     let port: usize = usize::from_str(matches.value_of("port").unwrap_or("3400")).unwrap_or(3400);
     let address = format!("0.0.0.0:{}", port);
     let socket = std::net::UdpSocket::bind(&address).expect("Couldn't bind to address");
@@ -113,15 +147,16 @@ fn parse_args(matches: &clap::ArgMatches) -> ((usize, usize), String, UdpSocket)
     let core_depth = topo.depth_or_below_for_type(&ObjectType::Core).unwrap();
     let all_cores = topo.objects_at_depth(core_depth);
 
-    let mut pin_to: (usize, usize) = (0, 0);
-    for core in all_cores {
-        for smt_thread in core.children().iter() {
-            if smt_thread.os_index() == core_id {
-                pin_to.0 = smt_thread.os_index() as usize;
-                pin_to.1 = smt_thread.next_sibling().expect("CPU doesn't have SMT (check that provided core_id is the min of the pair)?").os_index() as usize;
+    let pin_to: Option<(usize, usize)> = core_id.and_then(|c: u32| {
+        for core in all_cores {
+            for smt_thread in core.children().iter() {
+                if smt_thread.os_index() == c {
+                    return Some((smt_thread.os_index() as usize, smt_thread.next_sibling().expect("CPU doesn't have SMT (check that provided core_id is the min of the pair)?").os_index() as usize));
+                }
             }
         }
-    }
+        None
+    });
 
     (pin_to, address, socket)
 }
@@ -135,7 +170,10 @@ fn main() {
     if let Some(matches) = matches.subcommand_matches("smtconfig") {
         let (pin_to, address, socket) = parse_args(matches);
 
-        println!("Listening on {} with threads spawned on {:?}.", address, pin_to);
+        println!(
+            "Listening on {} with threads spawned on {:?}.",
+            address, pin_to
+        );
         let (tapp, tpoll) = spawn_listen_pair(
             String::from("test"),
             pin_to,
@@ -149,20 +187,24 @@ fn main() {
     if let Some(matches) = matches.subcommand_matches("single") {
         let (pin_to, address, socket) = parse_args(matches);
 
-        let mut affinity_set = CpuSet::new();
-        affinity_set.set(pin_to.0).expect("Can't set PU in core set");
-        affinity_set.set(pin_to.1).expect("Can't set PU in core set");
-        sched_setaffinity(getpid(), &affinity_set).expect("Can't server to core");
+        pin_to.map(|ids: (usize, usize)| {
+            pin_thread2(ids.0, ids.1);
+        });
 
-        println!("Listening on {} with process affinity set to {:?}.", address, pin_to);
+        println!(
+            "Listening on {} with process affinity set to {:?}.",
+            address, pin_to
+        );
         loop {
             let mut buf_network: [u8; 8] = [0; 8];
             let (size, addr) = socket
                 .recv_from(&mut buf_network)
                 .expect("Can't receive data.");
             assert!(size == 8);
-            
-            socket.send_to(&buf_network, addr).expect("Can't send reply back");
+
+            socket
+                .send_to(&buf_network, addr)
+                .expect("Can't send reply back");
         }
     }
 }

@@ -22,7 +22,7 @@ subcommands:
         args:
             - pin:
                 help: Which core to pin the process on.
-                required: true
+                required: false
             - port:
                 help: What port to listen on?
                 required: false
