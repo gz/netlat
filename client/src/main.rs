@@ -2,6 +2,7 @@ extern crate mio;
 extern crate time;
 extern crate byteorder;
 extern crate csv;
+#[macro_use]
 extern crate log;
 extern crate env_logger;
 #[macro_use]
@@ -38,6 +39,7 @@ fn main() {
     let suffix = value_t!(matches, "name", String).unwrap_or(String::from("none"));
 
     let mut handles = Vec::with_capacity(recipients.len());
+    debug!("Got {} recipients to send to.", recipients.len());
     let barrier = Arc::new(Barrier::new(recipients.len()));
 
     let counter = Arc::new(Mutex::new(0));
@@ -51,12 +53,13 @@ fn main() {
             let output = format!("latencies-{}-{}-{}.csv", dest[1], requests, suffix_clone);
             
             println!("Sending {} requests to address {} writing latencies to {}", requests, recipient, output);
-            let mut num = counter.lock().unwrap();
-            *num += 1;
+            let source_address = {
+                let mut num = counter.lock().unwrap();
+                *num += 1;
+                format!("0.0.0.0:{}", num)
+            };
 
-            let source_address = format!("0.0.0.0:{}", num);
             let sender = UdpSocket::bind(&source_address.parse().expect("Invalid address.")).expect("Can't bind");
-
             sender.connect(recipient.parse().expect("Invalid host:port pair")).expect("Can't connect to server");
             let poll = Poll::new().expect("Can't create poll.");
             poll.register(&sender, PING, Ready::writable() | Ready::readable(), PollOpt::level()).expect("Can't register send event.");
@@ -70,6 +73,7 @@ fn main() {
             let mut waiting_for_reply = false;
 
             c.wait();
+            debug!("Start sending...");
             loop {
                 poll.poll(&mut events, Some(Duration::from_millis(100))).expect("Can't poll channel");
                 for event in events.iter() {
@@ -79,18 +83,19 @@ fn main() {
                         let bytes_sent = sender.send(&buf).expect("Sending failed!");
                         assert_eq!(bytes_sent, 8);
                         buf.clear();
+                        //debug!("Sent ts packet");
 
                         waiting_for_reply = true;
                     }
 
                     if waiting_for_reply && event.readiness().is_readable() {
+                        //debug!("Received ts packet");
                         let _ = sender.recv_from(&mut recv_buf).expect("Can't receive timestamp back.");
                         let now = time::precise_time_ns();
                         let sent = recv_buf.as_slice().read_u64::<BigEndian>().expect("Can't parse timestamp");
 
                         wtr.serialize(Row { latency_ns: now-sent }).expect("Can't write record");
                         i = i + 1;
-
                         waiting_for_reply = false;
                     }
                 }
@@ -100,15 +105,15 @@ fn main() {
                 }
 
                 if i == requests-1 {
+                    debug!("Sender for {} done.", dest[1]);
                     break;
                 }
             }
+            
         }));
     }
-
 
     for handle in handles {
         handle.join().unwrap();
     }
-
 }
