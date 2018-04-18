@@ -21,9 +21,6 @@ use byteorder::{BigEndian, WriteBytesExt, ReadBytesExt};
 use mio::net::UdpSocket;
 use mio::{Events, Ready, Poll, PollOpt, Token};
 
-
-//use {expect_events, sleep_ms};
-
 #[derive(Serialize)]
 struct Row {
     latency_ns: u64,

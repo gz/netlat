@@ -1,14 +1,14 @@
-name: Echo server
+name: Echo client
 version: "1.0"
 author: Gerd Zellweger <mail@gerdzellweger.com>
-about: Replies to stuff...
+about: Sends stuff, records latencies.
 args:
     - verbose:
         short: v
         multiple: true
         help: Sets the level of verbosity
-    - ports:
-        help: Send to multiple ports
+    - destinations:
+        help: Send to these addr:port pairs
         short: p
         multiple: true
         takes_value: true
@@ -19,6 +19,6 @@ args:
         takes_value: true
         required: false
     - name:
-        help: Suffix to add to output files
+        help: Suffix for the output files
         short: s
         takes_value: true
