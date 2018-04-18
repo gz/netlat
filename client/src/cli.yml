@@ -1,0 +1,24 @@
+name: Echo server
+version: "1.0"
+author: Gerd Zellweger <mail@gerdzellweger.com>
+about: Replies to stuff...
+args:
+    - verbose:
+        short: v
+        multiple: true
+        help: Sets the level of verbosity
+    - ports:
+        help: Send to multiple ports
+        short: p
+        multiple: true
+        takes_value: true
+        required: false
+    - requests:
+        help: How many requests to send
+        short: r
+        takes_value: true
+        required: false
+    - name:
+        help: Suffix to add to output files
+        short: s
+        takes_value: true

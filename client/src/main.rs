@@ -2,19 +2,25 @@ extern crate mio;
 extern crate time;
 extern crate byteorder;
 extern crate csv;
+extern crate log;
+extern crate env_logger;
+#[macro_use]
+extern crate clap;
 
 #[macro_use]
 extern crate serde_derive;
 
-
-use std::env;
+use std::sync::{Arc, Barrier};
+use std::thread;
 use std::time::Duration;
+
 use csv::Writer;
+use clap::App;
+use byteorder::{BigEndian, WriteBytesExt, ReadBytesExt};
 
 use mio::net::UdpSocket;
 use mio::{Events, Ready, Poll, PollOpt, Token};
 
-use byteorder::{BigEndian, WriteBytesExt, ReadBytesExt};
 
 //use {expect_events, sleep_ms};
 
@@ -26,60 +32,81 @@ struct Row {
 const PING: Token = Token(0);
 
 fn main() {
+    env_logger::init();
 
-    let args: Vec<String> = env::args().collect();
-    assert!(args.len() >= 4);
-    println!("Sending {} requests to {} writing latencies to {}", args[1], args[2], args[3]);
+    let yaml = load_yaml!("cli.yml");
+    let matches = App::from_yaml(yaml).get_matches();
+    let requests = value_t!(matches, "requests", u64).unwrap_or(250000);
+    let recipients = values_t!(matches, "ports", String).unwrap_or_else(|e| e.exit());
+    let suffix = value_t!(matches, "name", String).unwrap_or(String::from("none"));
 
-    let sender = UdpSocket::bind(&"0.0.0.0:1111".parse().expect("Invalid address.")).expect("Can't bind");
-    let requests = args[1].parse::<u64>().expect("First argument should be request count (u64).");
+    let mut handles = Vec::with_capacity(recipients.len());
+    let barrier = Arc::new(Barrier::new(recipients.len()));
 
-    sender.connect(args[2].parse().expect("Invalid host:port pair")).expect("Can't connect to server");
-    let poll = Poll::new().expect("Can't create poll.");
+    let source_port = 1110;
+    for recipient in recipients {
+        let c = barrier.clone();
+        let suffix_clone = suffix.clone();
+        handles.push(thread::spawn(move|| {
+            let dest: Vec<&str> = recipient.split(":").collect();
+            let output = format!("latencies-{}-{}-{}.csv", dest[1], requests, suffix_clone);
+            
+            println!("Sending {} requests to address {} writing latencies to {}", requests, recipient, output);
+            let source_address = format!("0.0.0.0:{}", source_port+1);
+            let sender = UdpSocket::bind(&source_address.parse().expect("Invalid address.")).expect("Can't bind");
 
-    poll.register(&sender, PING, Ready::writable() | Ready::readable(), PollOpt::level()).expect("Can't register send event.");
+            sender.connect(recipient.parse().expect("Invalid host:port pair")).expect("Can't connect to server");
+            let poll = Poll::new().expect("Can't create poll.");
+            poll.register(&sender, PING, Ready::writable() | Ready::readable(), PollOpt::level()).expect("Can't register send event.");
 
-    let mut buf = Vec::with_capacity(8);
-    let mut events = Events::with_capacity(1024);
+            let mut buf = Vec::with_capacity(8);
+            let mut events = Events::with_capacity(1024);
+            let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
+            recv_buf.resize(8, 0);
+            let mut wtr = Writer::from_path(output).expect("Can't open log file for writing");
+            let mut i = 0;
+            let mut waiting_for_reply = false;
 
-    let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
-    recv_buf.resize(8, 0);
+            c.wait();
+            loop {
+                poll.poll(&mut events, Some(Duration::from_millis(100))).expect("Can't poll channel");
+                for event in events.iter() {
+        
+                    if  !waiting_for_reply && event.readiness().is_writable() {
+                        buf.write_u64::<BigEndian>(time::precise_time_ns()).expect("Serialize time");
+                        let bytes_sent = sender.send(&buf).expect("Sending failed!");
+                        assert_eq!(bytes_sent, 8);
+                        buf.clear();
 
-    let mut wtr = Writer::from_path(args[3].clone()).expect("Can't open log file for writing");
-    
-    let mut i = 0;
-    let mut waiting_for_reply = false;
-    loop {
-        poll.poll(&mut events, Some(Duration::from_millis(100))).expect("Can't poll channel");
-        for event in events.iter() {
- 
-            if  !waiting_for_reply && event.readiness().is_writable() {
-                buf.write_u64::<BigEndian>(time::precise_time_ns()).expect("Serialize time");
-                let bytes_sent = sender.send(&buf).expect("Sending failed!");
-                assert_eq!(bytes_sent, 8);
-                buf.clear();
+                        waiting_for_reply = true;
+                    }
 
-                waiting_for_reply = true;
+                    if waiting_for_reply && event.readiness().is_readable() {
+                        let _ = sender.recv_from(&mut recv_buf).expect("Can't receive timestamp back.");
+                        let now = time::precise_time_ns();
+                        let sent = recv_buf.as_slice().read_u64::<BigEndian>().expect("Can't parse timestamp");
+
+                        wtr.serialize(Row { latency_ns: now-sent }).expect("Can't write record");
+                        i = i + 1;
+
+                        waiting_for_reply = false;
+                    }
+                }
+
+                if i % 10000 == 0 {
+                    wtr.flush().expect("Can't flush the csv log");
+                }
+
+                if i == requests-1 {
+                    break;
+                }
             }
-
-            if waiting_for_reply && event.readiness().is_readable() {
-                let _ = sender.recv_from(&mut recv_buf).expect("Can't receive timestamp back.");
-                let now = time::precise_time_ns();
-                let sent = recv_buf.as_slice().read_u64::<BigEndian>().expect("Can't parse timestamp");
-
-                wtr.serialize(Row { latency_ns: now-sent }).expect("Can't write record");
-                i = i + 1;
-
-                waiting_for_reply = false;
-            }
-        }
-
-        if i % 10000 == 0 {
-            wtr.flush().expect("Can't flush the csv log");
-        }
-
-        if i == requests-1 {
-            break;
-        }
+        }));
     }
+
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
 }
