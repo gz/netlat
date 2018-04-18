@@ -34,7 +34,7 @@ fn main() {
     let yaml = load_yaml!("cli.yml");
     let matches = App::from_yaml(yaml).get_matches();
     let requests = value_t!(matches, "requests", u64).unwrap_or(250000);
-    let recipients = values_t!(matches, "ports", String).unwrap_or_else(|e| e.exit());
+    let recipients = values_t!(matches, "destinations", String).unwrap_or_else(|e| e.exit());
     let suffix = value_t!(matches, "name", String).unwrap_or(String::from("none"));
 
     let mut handles = Vec::with_capacity(recipients.len());
