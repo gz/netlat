@@ -10,7 +10,7 @@ extern crate clap;
 #[macro_use]
 extern crate serde_derive;
 
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -40,17 +40,21 @@ fn main() {
     let mut handles = Vec::with_capacity(recipients.len());
     let barrier = Arc::new(Barrier::new(recipients.len()));
 
-    let source_port = 1110;
+    let counter = Arc::new(Mutex::new(0));
     for recipient in recipients {
         let c = barrier.clone();
         let suffix_clone = suffix.clone();
+        let counter = Arc::clone(&counter);
+
         handles.push(thread::spawn(move|| {
             let dest: Vec<&str> = recipient.split(":").collect();
             let output = format!("latencies-{}-{}-{}.csv", dest[1], requests, suffix_clone);
             
             println!("Sending {} requests to address {} writing latencies to {}", requests, recipient, output);
-            let source_port = source_port + 1;
-            let source_address = format!("0.0.0.0:{}", source_port);
+            let mut num = counter.lock().unwrap();
+            *num += 1;
+
+            let source_address = format!("0.0.0.0:{}", num);
             let sender = UdpSocket::bind(&source_address.parse().expect("Invalid address.")).expect("Can't bind");
 
             sender.connect(recipient.parse().expect("Invalid host:port pair")).expect("Can't connect to server");
