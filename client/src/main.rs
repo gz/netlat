@@ -49,7 +49,8 @@ fn main() {
             let output = format!("latencies-{}-{}-{}.csv", dest[1], requests, suffix_clone);
             
             println!("Sending {} requests to address {} writing latencies to {}", requests, recipient, output);
-            let source_address = format!("0.0.0.0:{}", source_port+1);
+            let source_port = source_port + 1;
+            let source_address = format!("0.0.0.0:{}", source_port);
             let sender = UdpSocket::bind(&source_address.parse().expect("Invalid address.")).expect("Can't bind");
 
             sender.connect(recipient.parse().expect("Invalid host:port pair")).expect("Can't connect to server");
