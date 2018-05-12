@@ -6,20 +6,25 @@ extern crate nix;
 extern crate log;
 extern crate env_logger;
 
+use std::net;
 use std::net::UdpSocket;
 use std::ops::Add;
+use std::os::unix::io::AsRawFd;
 use std::str::FromStr;
 use std::sync::mpsc::channel;
 use std::thread;
 
-use hwloc::{ObjectType, Topology};
+use nix::sys::socket;
+use nix::sys::time;
+use nix::sys::uio;
 
 use clap::App;
+use hwloc::{ObjectType, Topology};
 
 #[cfg(target_os = "linux")]
 fn pin_thread(core_id: usize) {
-    use nix::unistd::getpid;
     use nix::sched::{sched_setaffinity, CpuSet};
+    use nix::unistd::getpid;
 
     let pid = getpid();
     let mut affinity_set = CpuSet::new();
@@ -29,14 +34,16 @@ fn pin_thread(core_id: usize) {
 
 #[cfg(target_os = "linux")]
 fn pin_thread2(core_id: usize, core_id2: usize) {
-    use nix::unistd::getpid;
     use nix::sched::{sched_setaffinity, CpuSet};
+    use nix::unistd::getpid;
 
     let pid = getpid();
     let mut affinity_set = CpuSet::new();
     affinity_set.set(core_id).expect("Can't set PU in core set");
-    affinity_set.set(core_id2).expect("Can't set PU in core set");
-    
+    affinity_set
+        .set(core_id2)
+        .expect("Can't set PU in core set");
+
     sched_setaffinity(pid, &affinity_set).expect("Can't pin app thread to core");
 }
 
@@ -71,7 +78,6 @@ fn spawn_listen_pair(
         .name(t_app_name)
         .stack_size(4096 * 10)
         .spawn(move || loop {
-           
             on_core.map(|ids: (usize, usize)| {
                 pin_thread(ids.0);
             });
@@ -103,7 +109,6 @@ fn spawn_listen_pair(
         .name(t_poll_name)
         .stack_size(4096 * 10)
         .spawn(move || {
-
             on_core.map(|ids: (usize, usize)| {
                 pin_thread(ids.1);
             });
@@ -133,14 +138,51 @@ fn spawn_listen_pair(
     (t_app, t_poll)
 }
 
-fn parse_args(matches: &clap::ArgMatches) -> (Option<(usize, usize)>, String, UdpSocket) {
+extern "C" {
+    pub fn getifaceaddr(interface: *const nix::libc::c_char) -> socket::sockaddr;
+    pub fn enable_hwtstamp(sock: i32, interface: *const nix::libc::c_char) -> i32;
+}
+
+fn parse_args(matches: &clap::ArgMatches) -> (Option<(usize, usize)>, net::SocketAddr, UdpSocket) {
     let core_id: Option<u32> = matches
         .value_of("pin")
         .and_then(|c: &str| u32::from_str(c).ok());
+    let iface = matches.value_of("iface").unwrap_or("enp130s0");
+    let interface = std::ffi::CString::new(iface).expect("Can't be null");
+    let port: u16 = u16::from_str(matches.value_of("port").unwrap_or("3400")).unwrap_or(3400);
 
-    let port: usize = usize::from_str(matches.value_of("port").unwrap_or("3400")).unwrap_or(3400);
-    let address = format!("0.0.0.0:{}", port);
-    let socket = std::net::UdpSocket::bind(&address).expect("Couldn't bind to address");
+    let address = if matches.is_present("iface") {
+        unsafe {
+            let interface_addr = getifaceaddr(interface.as_ptr());
+            match socket::SockAddr::from_libc_sockaddr(&interface_addr) {
+                Some(socket::SockAddr::Inet(s)) => {
+                    let mut addr = s.to_std();
+                    addr.set_port(port);
+                    debug!("Found address {} for {}", addr, iface);
+                    addr
+                }
+                _ => panic!("Could not find address for {:?}", iface),
+            }
+        }
+    } else {
+        net::SocketAddr::new(net::IpAddr::V4(net::Ipv4Addr::new(0, 0, 0, 0)), port)
+    };
+
+    let socket = net::UdpSocket::bind(address).expect("Couldn't bind to address");
+
+    if matches.is_present("timestamp") && matches.is_present("iface") {
+        debug!("Enable timestamps for {}", iface);
+        unsafe {
+            let r = enable_hwtstamp(socket.as_raw_fd(), interface.as_ptr());
+            if r != 0 {
+                panic!(
+                    "HW timstamping enable failed (ret {}): {}",
+                    r,
+                    nix::errno::Errno::last()
+                );
+            }
+        }
+    };
 
     // Get the SMT threads for the Core
     let topo = Topology::new();
@@ -162,7 +204,7 @@ fn parse_args(matches: &clap::ArgMatches) -> (Option<(usize, usize)>, String, Ud
 }
 
 fn main() {
-    env_logger::init().expect("Can't initialize logging environment");
+    env_logger::init();
 
     let yaml = load_yaml!("cli.yml");
     let matches = App::from_yaml(yaml).get_matches();
@@ -195,16 +237,44 @@ fn main() {
             "Listening on {} with process affinity set to {:?}.",
             address, pin_to
         );
+
+        const CMSG_SIZE: usize =
+            std::mem::size_of::<socket::cmsghdr>() + std::mem::size_of::<time::TimeVal>() * 3;
+
+        println!("timval is {}", std::mem::size_of::<time::TimeVal>());
+
         loop {
             let mut buf_network: [u8; 8] = [0; 8];
-            let (size, addr) = socket
-                .recv_from(&mut buf_network)
-                .expect("Can't receive data.");
-            assert!(size == 8);
 
-            socket
+            let mut time: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
+            let received = socket::recvmsg(
+                socket.as_raw_fd(),
+                &[uio::IoVec::from_mut_slice(&mut buf_network)],
+                Some(&mut time),
+                socket::MsgFlags::empty(),
+            ).unwrap();
+            for cmsg in received.cmsgs() {
+
+                match cmsg {
+                    socket::ControlMessage::ScmRights(a) => println!("Rights message, wrong!"),
+                    socket::ControlMessage::ScmTimestamp(a) => println!("Timestamp {:?}!", a),
+                    socket::ControlMessage::ScmTimestamping(ts) => {
+                        println!("Timestamps {:?}!", ts);
+                        use nix::sys::time::TimeValLike;
+                        let d = std::time::Duration::new(ts[0].num_seconds() as u64, ts[0].num_nanoseconds() as u32);
+                        println!("{:?}", d);
+                    },
+                    socket::ControlMessage::Unknown(_) => println!("Unknown"),
+                }
+            }
+            /*let (size, addr) = socket
+                .recv_from(&mut buf_network)
+                .expect("Can't receive data.");*/
+            assert!(received.bytes == 8);
+
+            /*socket
                 .send_to(&buf_network, addr)
-                .expect("Can't send reply back");
+                .expect("Can't send reply back");*/
         }
     }
 }

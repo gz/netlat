@@ -13,7 +13,7 @@ extern crate serde_derive;
 
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Instant, Duration};
 
 use csv::Writer;
 use clap::App;
@@ -48,6 +48,17 @@ fn main() {
         let suffix_clone = suffix.clone();
         let counter = Arc::clone(&counter);
 
+        /*
+        int flags;
+        flags   = SOF_TIMESTAMPING_TX_HARDWARE
+                | SOF_TIMESTAMPING_RX_HARDWARE 
+                | SOF_TIMESTAMPING_TX_SOFTWARE
+                | SOF_TIMESTAMPING_RX_SOFTWARE 
+                | SOF_TIMESTAMPING_RAW_HARDWARE;
+        if (setsockopt(sd, SOL_SOCKET, SO_TIMESTAMPING, &flags, sizeof(flags)) < 0)
+            printf("ERROR: setsockopt SO_TIMESTAMPING\n");
+        */
+
         handles.push(thread::spawn(move|| {
             let dest: Vec<&str> = recipient.split(":").collect();
             let output = format!("latencies-{}-{}-{}.csv", dest[1], requests, suffix_clone);
@@ -69,23 +80,23 @@ fn main() {
             let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
             recv_buf.resize(8, 0);
             let mut wtr = Writer::from_path(output).expect("Can't open log file for writing");
-            let mut i = 0;
+            let mut received_count = 0;
             let mut waiting_for_reply = false;
+            let timeout = Duration::from_millis(500); // At that point we consider the UDP packet lost
+            let mut last_sent = Instant::now();
 
             c.wait();
             debug!("Start sending...");
             loop {
                 poll.poll(&mut events, Some(Duration::from_millis(100))).expect("Can't poll channel");
                 for event in events.iter() {
-        
                     if  !waiting_for_reply && event.readiness().is_writable() {
                         buf.write_u64::<BigEndian>(time::precise_time_ns()).expect("Serialize time");
                         let bytes_sent = sender.send(&buf).expect("Sending failed!");
                         assert_eq!(bytes_sent, 8);
                         buf.clear();
-                        //debug!("Sent ts packet");
-
                         waiting_for_reply = true;
+                        last_sent = Instant::now();
                     }
 
                     if waiting_for_reply && event.readiness().is_readable() {
@@ -93,18 +104,22 @@ fn main() {
                         let _ = sender.recv_from(&mut recv_buf).expect("Can't receive timestamp back.");
                         let now = time::precise_time_ns();
                         let sent = recv_buf.as_slice().read_u64::<BigEndian>().expect("Can't parse timestamp");
-
                         wtr.serialize(Row { latency_ns: now-sent }).expect("Can't write record");
-                        i = i + 1;
+                        received_count = received_count + 1;
                         waiting_for_reply = false;
                     }
                 }
 
-                if i % 10000 == 0 {
+                if waiting_for_reply && last_sent.elapsed() > timeout {
+                    error!("Dropped packet?");
+                    waiting_for_reply = false;
+                }
+
+                if received_count % 10000 == 0 {
                     wtr.flush().expect("Can't flush the csv log");
                 }
 
-                if i == requests-1 {
+                if received_count == requests {
                     debug!("Sender for {} done.", dest[1]);
                     break;
                 }

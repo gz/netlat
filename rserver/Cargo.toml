@@ -2,10 +2,14 @@
 name = "rserver"
 version = "0.1.0"
 authors = ["Gerd Zellweger <mail@gerdzellweger.com>"]
+build = "build.rs"
 
 [dependencies]
 clap = {version = "2.31", features = ["yaml"]}
-nix = "0.10.0"
+nix = {version = "0.11", path = "../nix" }
 hwloc = "0.5.0"
 log = { version = "0.4", features = ["max_level_debug", "release_max_level_warn"] }
 env_logger = "*"
+
+[build-dependencies]
+cc = "1"
