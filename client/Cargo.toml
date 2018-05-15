@@ -6,7 +6,6 @@ authors = ["Gerd Zellweger <mail@gerdzellweger.com>"]
 [dependencies]
 netbench = { path = "../netbench" }
 nix = { git = "https://github.com/gz/nix.git" }
-mio = "*"
 byteorder = "*"
 csv = "1"
 serde = "*"
