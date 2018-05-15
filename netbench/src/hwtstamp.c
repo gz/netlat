@@ -10,7 +10,10 @@
 #include <sys/ioctl.h>
 #include <arpa/inet.h>
 #include <net/if.h>
+
+#ifdef __linux
 #include <linux/net_tstamp.h>
+#endif
 
 #ifndef SIOCSHWTSTAMP
 # define SIOCSHWTSTAMP 0x89b0
@@ -37,6 +40,7 @@ struct sockaddr getifaceaddr(char* interface) {
 int enable_hwtstamp(int sock, char* interface)
 {
     struct ifreq hwtstamp;
+#ifdef __linux
     struct hwtstamp_config hwconfig, hwconfig_requested;
 
     memset(&hwtstamp, 0, sizeof(hwtstamp));
@@ -78,6 +82,8 @@ int enable_hwtstamp(int sock, char* interface)
                &enabled, sizeof(enabled)) < 0) {
         return -3;
     }
-
+#else
+    printf("Platform not supported, no timestamping!\n");
+#endif
     return 0;
 }

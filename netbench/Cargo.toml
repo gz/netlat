@@ -1,0 +1,16 @@
+[package]
+name = "netbench"
+version = "0.1.0"
+authors = ["Gerd Zellweger <mail@gerdzellweger.com>"]
+build = "build.rs"
+
+[dependencies]
+nix = { git = "https://github.com/gz/nix.git" }
+log = { version = "0.4" }
+serde_derive = "*"
+serde = "*"
+csv = "1"
+ctrlc = { version = "3", features = ["termination"] }
+
+[build-dependencies]
+cc = "1"

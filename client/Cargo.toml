@@ -4,12 +4,14 @@ version = "0.1.0"
 authors = ["Gerd Zellweger <mail@gerdzellweger.com>"]
 
 [dependencies]
+netbench = { path = "../netbench" }
+nix = { git = "https://github.com/gz/nix.git" }
 mio = "*"
-time = "0.1"
 byteorder = "*"
-csv = "1.0.0-beta.5"
-serde_derive = "*"
+csv = "1"
 serde = "*"
-clap = {version = "2.31", features = ["yaml"]}
+serde_derive = "*"
+clap = { version = "2.31", features = ["yaml"] }
 log = { version = "0.4", features = ["max_level_debug", "release_max_level_warn"] }
 env_logger = "*"
+time = "*"

@@ -22,3 +22,16 @@ args:
         help: Suffix for the output files
         short: s
         takes_value: true
+    - timestamps:
+        help: Enables kernel timestamping on socket for RX and TX paths and logs it.
+        short: t
+        long: timestamps
+        requires: iface
+        required: false
+    - iface:
+        help: Which interface the server should use.
+        long: iface
+        short: i
+        value_name: INTERFACE
+        takes_value: true
+        required: false

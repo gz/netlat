@@ -1,1 +1,0 @@
-ethtool -N eno1 rx-flow-hash udp4 sdfn

@@ -2,14 +2,12 @@
 name = "rserver"
 version = "0.1.0"
 authors = ["Gerd Zellweger <mail@gerdzellweger.com>"]
-build = "build.rs"
 
 [dependencies]
-clap = {version = "2.31", features = ["yaml"]}
+netbench = { path = "../netbench" }
 nix = { git = "https://github.com/gz/nix.git" }
+clap = {version = "2.31", features = ["yaml"]}
 hwloc = "0.5.0"
 log = { version = "0.4", features = ["max_level_debug", "release_max_level_warn"] }
 env_logger = "*"
-
-[build-dependencies]
-cc = "1"
+csv = "1"

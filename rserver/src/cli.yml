@@ -7,41 +7,31 @@ args:
         short: v
         multiple: true
         help: Sets the level of verbosity
+    - name:
+        help: Suffix for the output files
+        short: s
+        takes_value: true
+    - timestamps:
+        help: Enables kernel timestamping on socket for RX and TX paths and logs it.
+        short: t
+        long: timestamps
+        requires: iface
+        required: false
+    - pin:
+        help: Which core to pin the threads on.
+        required: false
+    - iface:
+        help: Which interface the server should use.
+        long: iface
+        short: i
+        value_name: INTERFACE
+        takes_value: true
+        required: false
+    - port:
+        help: What port to listen on?
+        required: false
 subcommands:
     - smtconfig:
         about: Run epoll and app logic on seperate hyperthreads.
-        args:
-            - pin:
-                help: Which core to pin the threads on.
-                required: false
-            - port:
-                help: What port to listen on?
-                required: false
-            - timestamp:
-                short: t
-                long: timestamp
-                value_name: INTERFACE
-                help: Enables timestampin on incoming packets for device
-                takes_value: true
     - single:
         about: Run epoll on a single core.
-        args:
-            - iface:
-                help: Which interface the server should use.
-                long: iface
-                short: i
-                value_name: INTERFACE
-                takes_value: true
-                required: false
-            - pin:
-                help: Which core to pin the process on.
-                required: false
-            - port:
-                help: What port to listen on?
-                required: false
-            - timestamp:
-                help: Enables timestamping on the interface.
-                long: timestamp
-                short: t
-                requires: iface
-                required: false
