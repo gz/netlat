@@ -136,6 +136,7 @@ pub fn create_writer(logfile: String, capacity: usize) -> Arc<Mutex<csv::Writer<
     // Make sure we flush the remaining log records in the CSV writer when we exit the server
     let signal_wtr = Arc::clone(&wtr);
     ctrlc::set_handler(move || {
+        debug!("Trying to acquire lock...");
         let mut logfile = signal_wtr.lock().unwrap();
         logfile.flush().expect("Can't flush the csv log");
         std::process::exit(0);

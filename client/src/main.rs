@@ -167,14 +167,6 @@ fn network_loop(
 
         packet_count = packet_count + 1;
 
-        // Periodically flush our buffer
-        if packet_count % 10000 == 0 {
-            wtr.lock()
-                .unwrap()
-                .flush()
-                .expect("Can't flush the csv log");
-        }
-
         // We're done sending requests, stop
         if packet_count == requests {
             debug!("Sender for {} done.", destination);

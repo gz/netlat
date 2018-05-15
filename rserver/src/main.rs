@@ -293,9 +293,6 @@ fn main() {
                 })
                 .expect("Can't write record.");
 
-            if packet_count % 10000 == 0 {
-                logfile.flush().expect("Can't flush the csv log");
-            }
             packet_count += 1;
             debug!("Handled request in {} ns", tx_nic - rx_nic);
         }
