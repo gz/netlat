@@ -125,11 +125,13 @@ pub fn now() -> u64 {
 /// Makes a new CSV writer to log the results. We register an abort handler
 /// to flush the records out since the csv::Writer has some internal buffering
 /// that is not flushed in case we stop the process with SIGINT or SIGTERM.
-pub fn create_writer(logfile: String) -> Arc<Mutex<csv::Writer<std::fs::File>>> {
+pub fn create_writer(logfile: String, capacity: usize) -> Arc<Mutex<csv::Writer<std::fs::File>>> {
     // The CSV writer is accessed in the signal handler so we need to wrap it in Arc and Mutex
-    let wtr = Arc::new(Mutex::new(
-        csv::Writer::from_path(logfile).expect("Can't open log file for writing"),
-    ));
+    let wtr_handle = csv::WriterBuilder::new()
+        .buffer_capacity(capacity)
+        .from_path(logfile)
+        .expect("Can't build CSV writer");
+    let wtr = Arc::new(Mutex::new(wtr_handle));
 
     // Make sure we flush the remaining log records in the CSV writer when we exit the server
     let signal_wtr = Arc::clone(&wtr);

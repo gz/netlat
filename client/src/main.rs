@@ -90,7 +90,10 @@ fn network_loop(
     nic_timestamps: bool,
 ) {
     let output = format!("latencies-client-{}-{}.csv", destination.port(), suffix);
-    let wtr = netbench::create_writer(output.clone());
+    let wtr = netbench::create_writer(
+        output.clone(),
+        2 * requests as usize * std::mem::size_of::<netbench::LogRecord>(),
+    );
 
     println!(
         "Sending {} requests to {} writing latencies to {}",

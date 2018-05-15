@@ -226,7 +226,7 @@ fn main() {
     );
     // Set-up logging of latency timestamp
     let logfile = format!("latencies-rserver-{}-{}.csv", address.port(), suffix);
-    let wtr = netbench::create_writer(logfile);
+    let wtr = netbench::create_writer(logfile, 50 * 1024 * 1024);
 
     if let Some(_) = matches.subcommand_matches("smtconfig") {
         println!(
