@@ -14,4 +14,3 @@ serde_derive = "*"
 clap = { version = "2.31", features = ["yaml"] }
 log = { version = "0.4", features = ["max_level_debug", "release_max_level_warn"] }
 env_logger = "*"
-time = "*"
