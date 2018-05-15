@@ -225,7 +225,7 @@ fn main() {
         address, pin_to
     );
     // Set-up logging of latency timestamp
-    let logfile = format!("latencies-{}-{}.csv", address.port(), suffix);
+    let logfile = format!("latencies-rserver-{}-{}.csv", address.port(), suffix);
     let wtr = netbench::create_writer(logfile);
 
     if let Some(_) = matches.subcommand_matches("smtconfig") {
@@ -260,11 +260,6 @@ fn main() {
                 socket::MsgFlags::empty(),
             ).expect("Can't receive message");
             let rx_app = netbench::now();
-            let rx_nic = if nic_timestamps {
-                netbench::read_nic_timestamp(&msg).expect("NIC Timestamps not enabled?")
-            } else {
-                0
-            };
             assert!(msg.bytes == 8);
 
             let tx_app = netbench::now();
@@ -274,6 +269,13 @@ fn main() {
                 &msg.address.expect("Need a recipient"),
                 socket::MsgFlags::empty(),
             ).expect("Sending reply failed");
+
+            // Read hardware timestamps
+            let rx_nic = if nic_timestamps {
+                netbench::read_nic_timestamp(&msg).expect("NIC Timestamps not enabled?")
+            } else {
+                0
+            };
             let tx_nic = if nic_timestamps {
                 netbench::retrieve_tx_timestamp(socket.as_raw_fd(), &mut time_tx)
                     .expect("NIC Timestamps not enabled?")
