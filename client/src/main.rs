@@ -26,6 +26,13 @@ use nix::sys::uio;
 
 const PING: Token = Token(0);
 
+#[derive(Debug, Eq, PartialEq)]
+enum HandlerState {
+    SendPacket,
+    WaitForReply,
+    ReadSentTimestamp,
+}
+
 fn parse_args(
     matches: &clap::ArgMatches,
 ) -> (Vec<(net::SocketAddr, net::UdpSocket)>, String, bool, u64) {
@@ -96,10 +103,7 @@ fn network_loop(
     nic_timestamps: bool,
 ) {
     let output = format!("latencies-client-{}-{}.csv", destination.port(), suffix);
-    let wtr = netbench::create_writer(
-        output.clone(),
-        2 * requests as usize * std::mem::size_of::<netbench::LogRecord>(),
-    );
+    let wtr = netbench::create_writer(output.clone(), 50 * 1024 * 1024);
 
     println!(
         "Sending {} requests to {} writing latencies to {}",
@@ -121,16 +125,17 @@ fn network_loop(
     let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
     recv_buf.resize(8, 0);
 
-    let mut waiting_for_reply = false;
     let timeout = Duration::from_millis(500); // At that point we consider the UDP packet lost
     let mut last_sent = Instant::now();
     let mut packet_count = 0;
+
     let mut time_rx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
     let mut time_tx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
 
-    // XXX: Code currently assumes closed loop system
+    let mut rx_app = 0;
+    let mut rx_nic = 0;
     let mut tx_app = 0;
-    let mut tx_nic = 0;
+    let mut state_machine = HandlerState::SendPacket;
 
     barrier.wait();
     debug!("Start sending...");
@@ -139,7 +144,7 @@ fn network_loop(
             .expect("Can't poll channel");
         for event in events.iter() {
             // Send a packet
-            if !waiting_for_reply && event.readiness().is_writable() {
+            if state_machine == HandlerState::SendPacket && event.readiness().is_writable() {
                 tx_app = netbench::now();
 
                 packet_buffer
@@ -150,46 +155,22 @@ fn network_loop(
                     mio_socket.as_raw_fd(),
                     &packet_buffer,
                     socket::MsgFlags::empty(),
-                ).expect("Sending reply failed");
+                ).expect("Sending packet failed.");
 
-                tx_nic = if nic_timestamps {
+                assert_eq!(bytes_sent, 8);
+                packet_buffer.clear();
+                last_sent = Instant::now();
+                state_machine = HandlerState::WaitForReply;
+            }
+
+            if state_machine == HandlerState::ReadSentTimestamp {
+                debug!("Reading timestamp");
+                let tx_nic = if nic_timestamps {
                     netbench::retrieve_tx_timestamp(mio_socket.as_raw_fd(), &mut time_tx)
                         .expect("NIC Timestamps not enabled?")
                 } else {
                     0
                 };
-
-                assert_eq!(bytes_sent, 8);
-                packet_buffer.clear();
-                waiting_for_reply = true;
-                last_sent = Instant::now();
-            }
-
-            // Receive a packet
-            if waiting_for_reply && event.readiness().is_readable() {
-                //debug!("Received ts packet");
-
-                // Get the packet
-                let msg = socket::recvmsg(
-                    mio_socket.as_raw_fd(),
-                    &[uio::IoVec::from_mut_slice(&mut recv_buf)],
-                    Some(&mut time_rx),
-                    socket::MsgFlags::empty(),
-                ).expect("Can't receive message");
-                let rx_app = netbench::now();
-                let rx_nic = if nic_timestamps {
-                    netbench::read_nic_timestamp(&msg).expect("NIC Timestamps not enabled?")
-                } else {
-                    0
-                };
-                assert!(msg.bytes == 8);
-
-                // Sanity check that we measure the packet we sent...
-                let sent = recv_buf
-                    .as_slice()
-                    .read_u64::<BigEndian>()
-                    .expect("Can't parse timestamp");
-                assert!(sent == tx_app);
 
                 // Log all the timestamps
                 let mut logfile = wtr.lock().unwrap();
@@ -203,18 +184,54 @@ fn network_loop(
                     .expect("Can't write record.");
 
                 packet_count = packet_count + 1;
-                waiting_for_reply = false;
+                state_machine = HandlerState::SendPacket;
+            }
+
+            // Receive a packet
+            if state_machine == HandlerState::WaitForReply && event.readiness().is_readable() {
+                debug!("Received ts packet");
+
+                // Get the packet
+                let msg = socket::recvmsg(
+                    mio_socket.as_raw_fd(),
+                    &[uio::IoVec::from_mut_slice(&mut recv_buf)],
+                    Some(&mut time_rx),
+                    socket::MsgFlags::empty(),
+                ).expect("Can't receive message");
+                rx_app = netbench::now();
+                rx_nic = if nic_timestamps {
+                    netbench::read_nic_timestamp(&msg).expect("NIC Timestamps not enabled?")
+                } else {
+                    0
+                };
+                assert!(msg.bytes == 8);
+
+                // Sanity check that we measure the packet we sent...
+                let sent = recv_buf
+                    .as_slice()
+                    .read_u64::<BigEndian>()
+                    .expect("Can't parse timestamp");
+                assert!(sent == tx_app);
+
+                debug!("received packet");
+                state_machine = HandlerState::ReadSentTimestamp;
             }
         }
 
         // Report error if we don't see a reply within 500ms and try again with another packet
-        if waiting_for_reply && last_sent.elapsed() > timeout {
+        if state_machine == HandlerState::WaitForReply && last_sent.elapsed() > timeout {
             error!("Dropped packet?");
-            waiting_for_reply = false;
+            if nic_timestamps {
+                // Make sure we read the timestamp of the dropped packet so error queue is clear again
+                // I guess this is the proper way to do it...
+                netbench::retrieve_tx_timestamp(mio_socket.as_raw_fd(), &mut time_tx)
+                    .expect("NIC Timestamps not enabled?");
+            }
+            state_machine = HandlerState::SendPacket;
         }
 
         // We're done sending requests, stop
-        if packet_count == requests {
+        if state_machine == HandlerState::SendPacket && packet_count == requests {
             debug!("Sender for {} done.", destination);
             break;
         }
