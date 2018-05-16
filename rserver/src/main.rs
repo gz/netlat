@@ -5,6 +5,7 @@ extern crate hwloc;
 #[macro_use]
 extern crate log;
 extern crate env_logger;
+extern crate mio;
 extern crate netbench;
 extern crate nix;
 
@@ -19,7 +20,12 @@ use nix::sys::socket;
 use nix::sys::time;
 use nix::sys::uio;
 
+use mio::unix::UnixReady;
+use mio::Ready;
+
 use clap::App;
+
+const PONG: mio::Token = mio::Token(0);
 
 #[cfg(target_os = "linux")]
 fn pin_thread(core_id: usize) {
@@ -214,6 +220,121 @@ fn parse_args(
     (pin_to, address, socket, suffix, timestamping)
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum HandlerState {
+    /// We have received a packet, now sending reply
+    SendReply(socket::SockAddr),
+    /// Initial state or receive timestamp was read (last packet completely handled)
+    WaitForPacket,
+    /// We sent a reply, now reading the receive timestamp
+    ReadSentTimestamp,
+}
+
+fn network_loop(
+    address: net::SocketAddr,
+    socket: net::UdpSocket,
+    suffix: String,
+    nic_timestamps: bool,
+) {
+    let logfile = format!("latencies-rserver-{}-{}.csv", address.port(), suffix);
+    let wtr = netbench::create_writer(logfile.clone(), 50 * 1024 * 1024);
+
+    let mio_socket = mio::net::UdpSocket::from_socket(socket).expect("Can make socket");
+    let poll = mio::Poll::new().expect("Can't create poll.");
+    poll.register(
+        &mio_socket,
+        PONG,
+        Ready::writable() | Ready::readable() | UnixReady::error(),
+        mio::PollOpt::level(),
+    ).expect("Can't register send event.");
+
+    let mut events = mio::Events::with_capacity(1024);
+    let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
+    recv_buf.resize(8, 0);
+
+    let mut packet_count = 0;
+
+    let mut time_rx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
+    let mut time_tx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
+
+    let mut rx_app = 0;
+    let mut rx_nic = 0;
+    let mut tx_app = 0;
+    let mut state_machine = HandlerState::WaitForPacket;
+
+    loop {
+        poll.poll(&mut events, Some(std::time::Duration::from_millis(100)))
+            .expect("Can't poll channel");
+        for event in events.iter() {
+            if state_machine == HandlerState::ReadSentTimestamp
+                && UnixReady::from(event.readiness()).is_error()
+            {
+                debug!("Reading timestamp");
+                let tx_nic = if nic_timestamps {
+                    netbench::retrieve_tx_timestamp(mio_socket.as_raw_fd(), &mut time_tx)
+                        .expect("NIC Timestamps not enabled?")
+                } else {
+                    0
+                };
+
+                // Log all the timestamps
+                let mut logfile = wtr.lock().unwrap();
+                logfile
+                    .serialize(netbench::LogRecord {
+                        rx_app: rx_app,
+                        rx_nic: rx_nic,
+                        tx_app: tx_app,
+                        tx_nic: tx_nic,
+                    })
+                    .expect("Can't write record.");
+
+                packet_count = packet_count + 1;
+                state_machine = HandlerState::WaitForPacket;
+            }
+
+            // Receive a packet
+            if state_machine == HandlerState::WaitForPacket && event.readiness().is_readable() {
+                debug!("Received packet");
+
+                // Get the packet
+                let msg = socket::recvmsg(
+                    mio_socket.as_raw_fd(),
+                    &[uio::IoVec::from_mut_slice(&mut recv_buf)],
+                    Some(&mut time_rx),
+                    socket::MsgFlags::empty(),
+                ).expect("Can't receive message");
+                rx_app = netbench::now();
+                rx_nic = if nic_timestamps {
+                    netbench::read_nic_timestamp(&msg).expect("NIC Timestamps not enabled?")
+                } else {
+                    0
+                };
+                assert!(msg.bytes == 8);
+
+                state_machine = HandlerState::SendReply(msg.address.expect("Need a recipient"));
+            }
+
+            // Send a packet
+            if event.readiness().is_writable() {
+                if let HandlerState::SendReply(addr) = state_machine {
+                    tx_app = netbench::now();
+
+                    let bytes_sent = socket::sendto(
+                        mio_socket.as_raw_fd(),
+                        &recv_buf,
+                        &addr,
+                        socket::MsgFlags::empty(),
+                    ).expect("Sending packet failed.");
+
+                    assert_eq!(bytes_sent, 8);
+                    //recv_buf.clear();
+                    state_machine = HandlerState::ReadSentTimestamp;
+                };
+            }
+        }
+    }
+}
+
 fn main() {
     env_logger::init();
     let yaml = load_yaml!("cli.yml");
@@ -224,9 +345,6 @@ fn main() {
         "Listening on {} with process affinity set to {:?}.",
         address, pin_to
     );
-    // Set-up logging of latency timestamp
-    let logfile = format!("latencies-rserver-{}-{}.csv", address.port(), suffix);
-    let wtr = netbench::create_writer(logfile, 50 * 1024 * 1024);
 
     if let Some(_) = matches.subcommand_matches("smtconfig") {
         println!(
@@ -248,53 +366,6 @@ fn main() {
             pin_thread2(ids.0, ids.1);
         });
 
-        let mut buf_network: [u8; 8] = [0; 8];
-        let mut time_rx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
-        let mut time_tx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
-        let mut packet_count = 0;
-        loop {
-            let msg = socket::recvmsg(
-                socket.as_raw_fd(),
-                &[uio::IoVec::from_mut_slice(&mut buf_network)],
-                Some(&mut time_rx),
-                socket::MsgFlags::empty(),
-            ).expect("Can't receive message");
-            let rx_app = netbench::now();
-            assert!(msg.bytes == 8);
-
-            let tx_app = netbench::now();
-            socket::sendto(
-                socket.as_raw_fd(),
-                &buf_network,
-                &msg.address.expect("Need a recipient"),
-                socket::MsgFlags::empty(),
-            ).expect("Sending reply failed");
-
-            // Read hardware timestamps
-            let rx_nic = if nic_timestamps {
-                netbench::read_nic_timestamp(&msg).expect("NIC Timestamps not enabled?")
-            } else {
-                0
-            };
-            let tx_nic = if nic_timestamps {
-                netbench::retrieve_tx_timestamp(socket.as_raw_fd(), &mut time_tx)
-                    .expect("NIC Timestamps not enabled?")
-            } else {
-                0
-            };
-
-            let mut logfile = wtr.lock().unwrap();
-            logfile
-                .serialize(netbench::LogRecord {
-                    rx_app: rx_app,
-                    rx_nic: rx_nic,
-                    tx_app: tx_app,
-                    tx_nic: tx_nic,
-                })
-                .expect("Can't write record.");
-
-            packet_count += 1;
-            debug!("Handled request in {} ns", tx_nic - rx_nic);
-        }
+        network_loop(address, socket, suffix, nic_timestamps);
     }
 }

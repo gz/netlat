@@ -11,3 +11,4 @@ hwloc = "0.5.0"
 log = { version = "0.4", features = ["max_level_debug", "release_max_level_warn"] }
 env_logger = "*"
 csv = "1"
+mio = "*"

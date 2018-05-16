@@ -18,13 +18,11 @@ use std::time::{Duration, Instant};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use clap::App;
 
-use mio::{Events, Poll, PollOpt, Ready, Token};
-
 use nix::sys::socket;
 use nix::sys::time;
 use nix::sys::uio;
 
-const PING: Token = Token(0);
+const PING: mio::Token = mio::Token(0);
 
 #[derive(Debug, Eq, PartialEq)]
 enum HandlerState {
@@ -111,16 +109,16 @@ fn network_loop(
     );
 
     let mio_socket = mio::net::UdpSocket::from_socket(socket).expect("Can make socket");
-    let poll = Poll::new().expect("Can't create poll.");
+    let poll = mio::Poll::new().expect("Can't create poll.");
     poll.register(
         &mio_socket,
         PING,
-        Ready::writable() | Ready::readable(),
-        PollOpt::level(),
+        mio::Ready::writable() | mio::Ready::readable() | mio::unix::UnixReady::error(),
+        mio::PollOpt::level(),
     ).expect("Can't register send event.");
 
     let mut packet_buffer = Vec::with_capacity(8);
-    let mut events = Events::with_capacity(1024);
+    let mut events = mio::Events::with_capacity(1024);
 
     let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
     recv_buf.resize(8, 0);
@@ -163,7 +161,9 @@ fn network_loop(
                 state_machine = HandlerState::WaitForReply;
             }
 
-            if state_machine == HandlerState::ReadSentTimestamp {
+            if state_machine == HandlerState::ReadSentTimestamp
+                && mio::unix::UnixReady::from(event.readiness()).is_error()
+            {
                 debug!("Reading timestamp");
                 let tx_nic = if nic_timestamps {
                     netbench::retrieve_tx_timestamp(mio_socket.as_raw_fd(), &mut time_tx)
@@ -184,7 +184,15 @@ fn network_loop(
                     .expect("Can't write record.");
 
                 packet_count = packet_count + 1;
-                state_machine = HandlerState::SendPacket;
+                if packet_count == requests {
+                    logfile.flush().expect("Can't flush the log");
+                    debug!("Sender for {} done.", destination);
+                    // We're done sending requests, stop
+                    return;
+                } else {
+                    // Send another packet
+                    state_machine = HandlerState::SendPacket;
+                }
             }
 
             // Receive a packet
@@ -228,12 +236,6 @@ fn network_loop(
                     .expect("NIC Timestamps not enabled?");
             }
             state_machine = HandlerState::SendPacket;
-        }
-
-        // We're done sending requests, stop
-        if state_machine == HandlerState::SendPacket && packet_count == requests {
-            debug!("Sender for {} done.", destination);
-            break;
         }
     }
 }
