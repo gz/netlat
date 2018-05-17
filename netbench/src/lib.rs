@@ -120,6 +120,7 @@ pub fn read_nic_timestamp(msg: &socket::RecvMsg, method: PacketTimestamp) -> u64
                     _ => panic!("Got Unexpected ControlMessage on RX path!"),
                 }
             }
+            panic!("No Control Message found");
         }
         PacketTimestamp::None => 0,
     }
