@@ -16,11 +16,29 @@ use nix::sys::time;
 
 use std::os::unix::io::RawFd;
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize)]
+pub enum PacketTimestamp {
+    None,
+    Software,
+    Hardware,
+}
+
 extern "C" {
     /// Given an interface name (i.e., ifconfig name), return its IP address (we implicitly look for an AF_INET; IPv4 address).
     pub fn getifaceaddr(interface: *const libc::c_char) -> socket::sockaddr;
     /// Enable timestamping on the socket and for the given interface.
-    pub fn enable_hwtstamp(sock: i32, interface: *const libc::c_char) -> i32;
+    fn enable_hwtstamp(sock: i32, interface: *const libc::c_char, hw: bool) -> i32;
+}
+
+pub unsafe fn enable_packet_timestamps(
+    sock: i32,
+    interface: *const libc::c_char,
+    method: PacketTimestamp,
+) -> i32 {
+    if method == PacketTimestamp::None {
+        return 0;
+    }
+    enable_hwtstamp(sock, interface, method == PacketTimestamp::Hardware)
 }
 
 /// A record that logs timestamps for every sent packet.
@@ -57,7 +75,8 @@ pub fn rstimespec_to_ns(ts: nix::sys::time::TimeSpec) -> u64 {
 pub fn retrieve_tx_timestamp(
     sock: RawFd,
     cmsg_space: &mut socket::CmsgSpace<[time::TimeVal; 3]>,
-) -> Option<u64> {
+    method: PacketTimestamp,
+) -> u64 {
     use nix::sys::uio;
 
     let msg = socket::recvmsg(
@@ -66,47 +85,51 @@ pub fn retrieve_tx_timestamp(
         Some(cmsg_space),
         socket::MsgFlags::MSG_ERRQUEUE,
     ).expect("Can't receive on error queue");
-    read_nic_timestamp(&msg)
+    read_nic_timestamp(&msg, method)
 }
 
 #[cfg(not(target_os = "linux"))]
 pub fn retrieve_tx_timestamp(
     _sock: RawFd,
     _cmsg_space: &mut socket::CmsgSpace<[time::TimeVal; 3]>,
-) -> Option<u64> {
-    warn!("Can't retrieve timestamp on the current platform.");
-    None
+    method: PacketTimestamp,
+) -> u64 {
+    debug!("Can't retrieve timestamp on the current platform.");
+    assert!(method == PacketTimestamp::None);
+    0
 }
 
 /// Return the corresponding NIC timestamp (HW or SW) of a given message in ns.
 #[cfg(target_os = "linux")]
-pub fn read_nic_timestamp(msg: &socket::RecvMsg) -> Option<u64> {
-    for cmsg in msg.cmsgs() {
-        match cmsg {
-            socket::ControlMessage::ScmTimestamping(timestamps) => {
-                let ts = if rstimespec_to_ns(timestamps[2]) != 0 {
-                    // Try to use the hardware timestamp by default
-                    timestamps[2]
-                } else {
-                    // In case we don't get that log it and return SW timestamp
-                    debug!("Didn't receive a hardware NIC timstamp.");
-                    timestamps[0]
-                };
+pub fn read_nic_timestamp(msg: &socket::RecvMsg, method: PacketTimestamp) -> u64 {
+    match method {
+        PacketTimestamp::Hardware | PacketTimestamp::Software => {
+            for cmsg in msg.cmsgs() {
+                match cmsg {
+                    socket::ControlMessage::ScmTimestamping(timestamps) => {
+                        let ts = if method == PacketTimestamp::Hardware {
+                            timestamps[2]
+                        } else {
+                            timestamps[0]
+                        };
 
-                let tstp = rstimespec_to_ns(ts);
-                assert!(tstp != 0);
-                return Some(tstp);
+                        let tstp = rstimespec_to_ns(ts);
+                        assert!(tstp != 0);
+                        return tstp;
+                    }
+                    _ => panic!("Got Unexpected ControlMessage on RX path!"),
+                }
             }
-            _ => panic!("Got Unexpected ControlMessage on RX path!"),
         }
+        PacketTimestamp::None => 0,
     }
-    None
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn read_nic_timestamp(_msg: &socket::RecvMsg) -> Option<u64> {
-    warn!("Can't retrieve timestamp on the current platform.");
-    None
+pub fn read_nic_timestamp(_msg: &socket::RecvMsg, method: PacketTimestamp) -> u64 {
+    debug!("Can't retrieve timestamp on the current platform.");
+    assert!(method == PacketTimestamp::None);
+    0
 }
 
 /// Returns current system time in nanoseconds.

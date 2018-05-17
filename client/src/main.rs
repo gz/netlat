@@ -33,13 +33,24 @@ enum HandlerState {
 
 fn parse_args(
     matches: &clap::ArgMatches,
-) -> (Vec<(net::SocketAddr, net::UdpSocket)>, String, bool, u64) {
-    let recipients = values_t!(matches, "destinations", String).unwrap();
-    let iface = String::from(matches.value_of("iface").unwrap_or("enp130s0"));
+) -> (
+    Vec<(net::SocketAddr, net::UdpSocket)>,
+    String,
+    netbench::PacketTimestamp,
+    u64,
+) {
+    let recipients = values_t!(matches, "destinations", String)
+        .unwrap_or(vec![String::from("192.168.0.7:3400")]);
+    let iface = String::from(matches.value_of("iface").unwrap_or("enp216s0f1"));
     let interface = std::ffi::CString::new(iface.clone()).expect("Can't be null");
     let suffix = value_t!(matches, "name", String).unwrap_or(String::from("none"));
-    let timestamping = matches.is_present("timestamps");
     let requests = value_t!(matches, "requests", u64).unwrap_or(250000);
+    let timestamp = match matches.value_of("timestamp").unwrap_or("hardware") {
+        "hardware" => netbench::PacketTimestamp::Hardware,
+        "software" => netbench::PacketTimestamp::Software,
+        "none" => netbench::PacketTimestamp::None,
+        _ => unreachable!("Invalid CLI argument, may be clap bug if possible_values doesn't work?"),
+    };
 
     let source_address: socket::SockAddr = {
         unsafe {
@@ -61,20 +72,20 @@ fn parse_args(
                     let sender = net::UdpSocket::bind(addr).expect("Can't bind");
 
                     // Enable timestamping for the socket
-                    if timestamping {
-                        debug!("Enable timestamps for {}", iface);
-                        unsafe {
-                            let r =
-                                netbench::enable_hwtstamp(sender.as_raw_fd(), interface.as_ptr());
-                            if r != 0 {
-                                panic!(
-                                    "HW timstamping enable failed (ret {}): {}",
-                                    r,
-                                    nix::errno::Errno::last()
-                                );
-                            }
+                    unsafe {
+                        let r = netbench::enable_packet_timestamps(
+                            sender.as_raw_fd(),
+                            interface.as_ptr(),
+                            timestamp,
+                        );
+                        if r != 0 {
+                            panic!(
+                                "HW timstamping enable failed (ret {}): {}",
+                                r,
+                                nix::errno::Errno::last()
+                            );
                         }
-                    };
+                    }
 
                     // Connect to server
                     let destination = recipient.parse().expect("Invalid host:port pair");
@@ -89,7 +100,7 @@ fn parse_args(
         })
         .collect();
 
-    (sockets, suffix, timestamping, requests)
+    (sockets, suffix, timestamp, requests)
 }
 
 fn network_loop(
@@ -98,7 +109,7 @@ fn network_loop(
     socket: net::UdpSocket,
     suffix: String,
     requests: u64,
-    nic_timestamps: bool,
+    timestamp_type: netbench::PacketTimestamp,
 ) {
     let output = format!("latencies-client-{}-{}.csv", destination.port(), suffix);
     let wtr = netbench::create_writer(output.clone(), 50 * 1024 * 1024);
@@ -162,15 +173,15 @@ fn network_loop(
             }
 
             if state_machine == HandlerState::ReadSentTimestamp
-                && mio::unix::UnixReady::from(event.readiness()).is_error()
+                && (mio::unix::UnixReady::from(event.readiness()).is_error()
+                    || timestamp_type == netbench::PacketTimestamp::None)
             {
                 debug!("Reading timestamp");
-                let tx_nic = if nic_timestamps {
-                    netbench::retrieve_tx_timestamp(mio_socket.as_raw_fd(), &mut time_tx)
-                        .expect("NIC Timestamps not enabled?")
-                } else {
-                    0
-                };
+                let tx_nic = netbench::retrieve_tx_timestamp(
+                    mio_socket.as_raw_fd(),
+                    &mut time_tx,
+                    timestamp_type,
+                );
 
                 // Log all the timestamps
                 let mut logfile = wtr.lock().unwrap();
@@ -188,6 +199,18 @@ fn network_loop(
                     logfile.flush().expect("Can't flush the log");
                     debug!("Sender for {} done.", destination);
                     // We're done sending requests, stop
+
+                    // Send 0 packet to rserver so it flushed the log
+                    packet_buffer
+                        .write_u64::<BigEndian>(0)
+                        .expect("Serialize time");
+
+                    socket::send(
+                        mio_socket.as_raw_fd(),
+                        &packet_buffer,
+                        socket::MsgFlags::empty(),
+                    ).expect("Sending packet failed.");
+
                     return;
                 } else {
                     // Send another packet
@@ -207,11 +230,7 @@ fn network_loop(
                     socket::MsgFlags::empty(),
                 ).expect("Can't receive message");
                 rx_app = netbench::now();
-                rx_nic = if nic_timestamps {
-                    netbench::read_nic_timestamp(&msg).expect("NIC Timestamps not enabled?")
-                } else {
-                    0
-                };
+                rx_nic = netbench::read_nic_timestamp(&msg, timestamp_type);
                 assert!(msg.bytes == 8);
 
                 // Sanity check that we measure the packet we sent...
@@ -221,7 +240,6 @@ fn network_loop(
                     .expect("Can't parse timestamp");
                 assert!(sent == tx_app);
 
-                debug!("received packet");
                 state_machine = HandlerState::ReadSentTimestamp;
             }
         }
@@ -229,12 +247,9 @@ fn network_loop(
         // Report error if we don't see a reply within 500ms and try again with another packet
         if state_machine == HandlerState::WaitForReply && last_sent.elapsed() > timeout {
             error!("Dropped packet?");
-            if nic_timestamps {
-                // Make sure we read the timestamp of the dropped packet so error queue is clear again
-                // I guess this is the proper way to do it...
-                netbench::retrieve_tx_timestamp(mio_socket.as_raw_fd(), &mut time_tx)
-                    .expect("NIC Timestamps not enabled?");
-            }
+            // Make sure we read the timestamp of the dropped packet so error queue is clear again
+            // I guess this is the proper way to do it...
+            netbench::retrieve_tx_timestamp(mio_socket.as_raw_fd(), &mut time_tx, timestamp_type);
             state_machine = HandlerState::SendPacket;
         }
     }
@@ -245,7 +260,7 @@ fn main() {
 
     let yaml = load_yaml!("cli.yml");
     let matches = App::from_yaml(yaml).get_matches();
-    let (sockets, suffix, nic_timestamps, requests) = parse_args(&matches);
+    let (sockets, suffix, timestamps, requests) = parse_args(&matches);
 
     debug!("Got {} recipients to send to.", sockets.len());
 
@@ -258,14 +273,7 @@ fn main() {
         let suffix = suffix.clone();
 
         handles.push(thread::spawn(move || {
-            network_loop(
-                barrier,
-                destination,
-                socket,
-                suffix,
-                requests,
-                nic_timestamps,
-            )
+            network_loop(barrier, destination, socket, suffix, requests, timestamps)
         }));
     }
 
