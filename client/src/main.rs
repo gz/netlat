@@ -134,7 +134,7 @@ fn network_loop(
     let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
     recv_buf.resize(8, 0);
 
-    let timeout = Duration::from_millis(500); // At that point we consider the UDP packet lost
+    let timeout = Duration::from_millis(500); // After 500ms we consider the UDP packet lost
     let mut last_sent = Instant::now();
     let mut packet_count = 0;
 

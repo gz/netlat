@@ -58,6 +58,8 @@ pub struct LogRecord {
     pub tx_app: u64,
     /// Timestamp (ns) when packet is sent by the NIC (either taken by NIC HW or driver SW)
     pub tx_nic: u64,
+    /// Time received at the HT in case `smt` mode is used in rserver (otherwise 0)
+    pub rx_ht: u64,
 }
 
 /// Transform timespec to nanoseconds.
@@ -167,4 +169,23 @@ pub fn create_writer(logfile: String, capacity: usize) -> Arc<Mutex<csv::Writer<
     }).expect("Error setting Ctrl-C handler");
 
     wtr
+}
+
+#[cfg(target_os = "linux")]
+pub fn pin_thread(core_id: Vec<usize>) {
+    use nix::sched::{sched_setaffinity, CpuSet};
+    use nix::unistd::getpid;
+
+    let pid = getpid();
+    let mut affinity_set = CpuSet::new();
+    for core_id in core_ids {
+        affinity_set.set(core_id).expect("Can't set PU in core set");
+    }
+    sched_setaffinity(pid, &affinity_set).expect("Can't pin app thread to core");
+}
+
+// And this function only gets compiled if the target OS is *not* linux
+#[cfg(not(target_os = "linux"))]
+pub fn pin_thread(_core_id: Vec<usize>) {
+    error!("Pinning threads not supported!");
 }

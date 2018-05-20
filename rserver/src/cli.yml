@@ -32,7 +32,7 @@ args:
         help: What port to listen on?
         required: false
 subcommands:
-    - smtconfig:
+    - smt:
         about: Run epoll and app logic on seperate hyperthreads.
     - single:
         about: Run epoll on a single core.
