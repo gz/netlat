@@ -83,11 +83,12 @@ fn network_loop(
                     || timestamp_type == netbench::PacketTimestamp::None)
             {
                 debug!("Reading timestamp");
-                let tx_nic = netbench::retrieve_tx_timestamp(
+                let (_id, tx_nic) = netbench::retrieve_tx_timestamp(
                     mio_socket.as_raw_fd(),
                     &mut time_tx,
                     timestamp_type,
                 );
+
                 // Log all the timestamps
                 let mut logfile = wtr.lock().unwrap();
                 logfile

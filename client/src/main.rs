@@ -9,6 +9,7 @@ extern crate clap;
 extern crate netbench;
 extern crate nix;
 
+use std::collections::HashMap;
 use std::net;
 use std::os::unix::io::AsRawFd;
 use std::sync::{Arc, Barrier};
@@ -31,6 +32,26 @@ enum HandlerState {
     ReadSentTimestamp,
 }
 
+struct MessageState {
+    timestamps: netbench::LogRecord,
+}
+
+impl MessageState {
+    pub fn new(tx_app: u64) -> MessageState {
+        let mut ms: MessageState = Default::default();
+        ms.timestamps.tx_app = tx_app;
+        ms
+    }
+}
+
+impl Default for MessageState {
+    fn default() -> MessageState {
+        MessageState {
+            timestamps: Default::default(),
+        }
+    }
+}
+
 fn parse_args(
     matches: &clap::ArgMatches,
 ) -> (
@@ -38,6 +59,7 @@ fn parse_args(
     String,
     netbench::PacketTimestamp,
     u64,
+    bool,
 ) {
     let recipients = values_t!(matches, "destinations", String)
         .unwrap_or(vec![String::from("192.168.0.7:3400")]);
@@ -51,6 +73,7 @@ fn parse_args(
         "none" => netbench::PacketTimestamp::None,
         _ => unreachable!("Invalid CLI argument, may be clap bug if possible_values doesn't work?"),
     };
+    let flood_mode = matches.is_present("flood");
 
     let source_address: socket::SockAddr = {
         unsafe {
@@ -100,7 +123,7 @@ fn parse_args(
         })
         .collect();
 
-    (sockets, suffix, timestamp, requests)
+    (sockets, suffix, timestamp, requests, flood_mode)
 }
 
 fn network_loop(
@@ -110,13 +133,14 @@ fn network_loop(
     suffix: String,
     requests: u64,
     timestamp_type: netbench::PacketTimestamp,
+    flood: bool,
 ) {
     let output = format!("latencies-client-{}-{}.csv", destination.port(), suffix);
     let wtr = netbench::create_writer(output.clone(), 50 * 1024 * 1024);
 
     println!(
-        "Sending {} requests to {} writing latencies to {}",
-        requests, destination, output
+        "Sending {} requests to {} writing latencies to {} (flood = {})",
+        requests, destination, output, flood
     );
 
     let mio_socket = mio::net::UdpSocket::from_socket(socket).expect("Can make socket");
@@ -140,11 +164,10 @@ fn network_loop(
 
     let mut time_rx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
     let mut time_tx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
-
-    let mut rx_app = 0;
-    let mut rx_nic = 0;
-    let mut tx_app = 0;
     let mut state_machine = HandlerState::SendPacket;
+
+    // Packets inflight (in case flood is false, this should be size 1)
+    let mut message_state: HashMap<u64, MessageState> = HashMap::with_capacity(1024);
 
     barrier.wait();
     debug!("Start sending...");
@@ -153,8 +176,10 @@ fn network_loop(
             .expect("Can't poll channel");
         for event in events.iter() {
             // Send a packet
-            if state_machine == HandlerState::SendPacket && event.readiness().is_writable() {
-                tx_app = netbench::now();
+            if (state_machine == HandlerState::SendPacket || flood)
+                && event.readiness().is_writable()
+            {
+                let tx_app = netbench::now();
 
                 packet_buffer
                     .write_u64::<BigEndian>(tx_app)
@@ -169,30 +194,33 @@ fn network_loop(
                 assert_eq!(bytes_sent, 8);
                 packet_buffer.clear();
                 last_sent = Instant::now();
+
+                message_state.insert(tx_app, MessageState::new(tx_app));
                 state_machine = HandlerState::WaitForReply;
             }
 
-            if state_machine == HandlerState::ReadSentTimestamp
+            if (state_machine == HandlerState::ReadSentTimestamp || flood)
                 && (mio::unix::UnixReady::from(event.readiness()).is_error()
                     || timestamp_type == netbench::PacketTimestamp::None)
             {
                 debug!("Reading timestamp");
-                let tx_nic = netbench::retrieve_tx_timestamp(
+                let (id, tx_nic) = netbench::retrieve_tx_timestamp(
                     mio_socket.as_raw_fd(),
                     &mut time_tx,
                     timestamp_type,
                 );
 
+                let mut mst = message_state
+                    .remove(&id)
+                    .expect("Need to have package state");
+                mst.timestamps.tx_nic = tx_nic;
+
                 // Log all the timestamps
                 let mut logfile = wtr.lock().unwrap();
                 logfile
-                    .serialize(netbench::LogRecord {
-                        rx_app: rx_app,
-                        rx_nic: rx_nic,
-                        tx_app: tx_app,
-                        tx_nic: tx_nic,
-                    })
+                    .serialize(&mst.timestamps)
                     .expect("Can't write record.");
+                message_state.remove(&id);
 
                 packet_count = packet_count + 1;
                 if packet_count == requests {
@@ -219,7 +247,9 @@ fn network_loop(
             }
 
             // Receive a packet
-            if state_machine == HandlerState::WaitForReply && event.readiness().is_readable() {
+            if (state_machine == HandlerState::WaitForReply || flood)
+                && event.readiness().is_readable()
+            {
                 debug!("Received ts packet");
 
                 // Get the packet
@@ -229,24 +259,27 @@ fn network_loop(
                     Some(&mut time_rx),
                     socket::MsgFlags::empty(),
                 ).expect("Can't receive message");
-                rx_app = netbench::now();
-                rx_nic = netbench::read_nic_timestamp(&msg, timestamp_type);
-                assert!(msg.bytes == 8);
-
-                // Sanity check that we measure the packet we sent...
                 let sent = recv_buf
                     .as_slice()
                     .read_u64::<BigEndian>()
                     .expect("Can't parse timestamp");
-                assert!(sent == tx_app);
 
+                let mut mst = message_state
+                    .get_mut(&sent)
+                    .expect("Need to have package state");
+                mst.timestamps.rx_app = netbench::now();
+                mst.timestamps.rx_nic = netbench::read_nic_timestamp(&msg, timestamp_type);
+                assert!(msg.bytes == 8);
+
+                // Sanity check that we measure the packet we sent...
+                assert!(sent == mst.timestamps.tx_app);
                 state_machine = HandlerState::ReadSentTimestamp;
             }
         }
 
         // Report error if we don't see a reply within 500ms and try again with another packet
         if state_machine == HandlerState::WaitForReply && last_sent.elapsed() > timeout {
-            error!("Dropped packet?");
+            error!("Not getting any replies?");
             // Make sure we read the timestamp of the dropped packet so error queue is clear again
             // I guess this is the proper way to do it...
             netbench::retrieve_tx_timestamp(mio_socket.as_raw_fd(), &mut time_tx, timestamp_type);
@@ -260,7 +293,7 @@ fn main() {
 
     let yaml = load_yaml!("cli.yml");
     let matches = App::from_yaml(yaml).get_matches();
-    let (sockets, suffix, timestamps, requests) = parse_args(&matches);
+    let (sockets, suffix, timestamps, requests, flood_mode) = parse_args(&matches);
 
     debug!("Got {} recipients to send to.", sockets.len());
 
@@ -273,7 +306,15 @@ fn main() {
         let suffix = suffix.clone();
 
         handles.push(thread::spawn(move || {
-            network_loop(barrier, destination, socket, suffix, requests, timestamps)
+            network_loop(
+                barrier,
+                destination,
+                socket,
+                suffix,
+                requests,
+                timestamps,
+                flood_mode,
+            )
         }));
     }
 

@@ -48,7 +48,7 @@ pub unsafe fn enable_packet_timestamps(
 ///  *
 ///  * Transmit timestamp (immediately before send call)
 ///  * Transmit timestamp on NIC (HW or SW)
-#[derive(Debug, Eq, PartialEq, Serialize)]
+#[derive(Debug, Eq, PartialEq, Serialize, Default)]
 pub struct LogRecord {
     /// Timestamp (ns) when packet is recveived at application (immediately after recv call returns)
     pub rx_app: u64,
@@ -78,16 +78,20 @@ pub fn retrieve_tx_timestamp(
     sock: RawFd,
     cmsg_space: &mut socket::CmsgSpace<[time::TimeVal; 3]>,
     method: PacketTimestamp,
-) -> u64 {
+) -> (u64, u64) {
     use nix::sys::uio;
+    let mut buf = [8; u8];
+    let mut iovec = [uio::IoVec::from_mut_slice(&mut buf)];
 
     let msg = socket::recvmsg(
         sock,
-        &[uio::IoVec::from_mut_slice(&mut [0; 0])],
+        &iovec,
         Some(cmsg_space),
         socket::MsgFlags::MSG_ERRQUEUE,
     ).expect("Can't receive on error queue");
-    read_nic_timestamp(&msg, method)
+
+    let payload_id = iovec[0].read_u64::<BigEndian>();
+    (payload_id, read_nic_timestamp(&msg, method))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -95,10 +99,10 @@ pub fn retrieve_tx_timestamp(
     _sock: RawFd,
     _cmsg_space: &mut socket::CmsgSpace<[time::TimeVal; 3]>,
     method: PacketTimestamp,
-) -> u64 {
+) -> (u64, u64) {
     debug!("Can't retrieve timestamp on the current platform.");
     assert!(method == PacketTimestamp::None);
-    0
+    (0, 0)
 }
 
 /// Return the corresponding NIC timestamp (HW or SW) of a given message in ns.
