@@ -10,6 +10,7 @@ extern crate mio;
 extern crate netbench;
 extern crate nix;
 
+use std::collections::VecDeque;
 use std::net;
 use std::ops::Add;
 use std::os::unix::io::AsRawFd;
@@ -30,14 +31,32 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 
 const PONG: mio::Token = mio::Token(0);
 
-#[derive(Debug, Eq, PartialEq, Copy, Clone)]
-enum HandlerState {
-    /// We have received a packet, now sending reply
-    SendReply(socket::SockAddr),
-    /// Initial state or receive timestamp was read (last packet completely handled)
-    WaitForPacket,
-    /// We sent a reply, now reading the receive timestamp
-    ReadSentTimestamp,
+#[derive(Debug)]
+struct MessageState {
+    id: u64,
+    sender: socket::SockAddr,
+    timestamps: netbench::LogRecord,
+}
+
+impl MessageState {
+    fn new(
+        id: u64,
+        sender: socket::SockAddr,
+        rx_app: u64,
+        rx_nic: u64,
+        rx_ht: u64,
+    ) -> MessageState {
+        let mut timestamps: netbench::LogRecord = Default::default();
+        timestamps.rx_app = rx_app;
+        timestamps.rx_nic = rx_nic;
+        timestamps.rx_ht = rx_ht;
+
+        MessageState {
+            id: id,
+            sender: sender,
+            timestamps: timestamps,
+        }
+    }
 }
 
 fn network_loop(
@@ -68,46 +87,39 @@ fn network_loop(
     let mut time_rx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
     let mut time_tx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
 
-    let mut rx_app = 0;
-    let mut rx_nic = 0;
-    let mut tx_app = 0;
-    let mut rx_ht = 0;
-    let mut state_machine = HandlerState::WaitForPacket;
+    // If this fails think about allocating it on the heap instead of copy?
+    assert!(std::mem::size_of::<MessageState>() < 256);
+    let mut send_state: VecDeque<MessageState> = VecDeque::with_capacity(1024);
+    let mut ts_state: VecDeque<MessageState> = VecDeque::with_capacity(1024);
 
     loop {
         poll.poll(&mut events, Some(std::time::Duration::from_millis(100)))
             .expect("Can't poll channel");
         for event in events.iter() {
-            if state_machine == HandlerState::ReadSentTimestamp
-                && (UnixReady::from(event.readiness()).is_error()
-                    || timestamp_type == netbench::PacketTimestamp::None)
-            {
-                debug!("Reading timestamp");
-                let (_id, tx_nic) = netbench::retrieve_tx_timestamp(
-                    mio_socket.as_raw_fd(),
-                    &mut time_tx,
-                    timestamp_type,
-                );
+            if UnixReady::from(event.readiness()).is_error() {
+                ts_state.pop_front().map(|mut st| {
+                    debug!("Reading timestamp");
+                    let (id, tx_nic) = netbench::retrieve_tx_timestamp(
+                        mio_socket.as_raw_fd(),
+                        &mut time_tx,
+                        timestamp_type,
+                    );
+                    println!("{} {}", id, st.id);
+                    assert!(id == st.id);
+                    st.timestamps.tx_nic = tx_nic;
+                    // Log all the timestamps
+                    let mut logfile = wtr.lock().unwrap();
+                    logfile
+                        .serialize(&st.timestamps)
+                        .expect("Can't write record.");
 
-                // Log all the timestamps
-                let mut logfile = wtr.lock().unwrap();
-                logfile
-                    .serialize(netbench::LogRecord {
-                        rx_app: rx_app,
-                        rx_nic: rx_nic,
-                        tx_app: tx_app,
-                        tx_nic: tx_nic,
-                        rx_ht: rx_ht,
-                    })
-                    .expect("Can't write record.");
-
-                packet_count = packet_count + 1;
-                state_machine = HandlerState::WaitForPacket;
+                    packet_count = packet_count + 1;
+                });
             }
 
             // Receive a packet
-            if state_machine == HandlerState::WaitForPacket && event.readiness().is_readable() {
-                debug!("Received packet");
+            if event.readiness().is_readable() {
+                debug!("Received packet {}", packet_count);
 
                 // Get the packet
                 let msg = socket::recvmsg(
@@ -116,51 +128,59 @@ fn network_loop(
                     Some(&mut time_rx),
                     socket::MsgFlags::empty(),
                 ).expect("Can't receive message");
-                rx_app = netbench::now();
+                let rx_app = netbench::now();
                 assert!(msg.bytes == 8);
                 let mut received_num = recv_buf
                     .as_slice()
                     .read_u64::<BigEndian>()
                     .expect("Can't parse timestamp");
 
-                app_channel.as_ref().map(|(txp, rxp)| {
+                let rx_ht = app_channel.as_ref().map_or(0, |(txp, rxp)| {
                     txp.send(received_num)
                         .expect("Can't forward data to the app thread over channel.");
                     let (payload, tst) = rxp.recv().expect("Can't receive data");
                     received_num = payload;
-                    rx_ht = tst;
+                    tst
                 });
 
-                recv_buf
-                    .write_u64::<BigEndian>(received_num)
-                    .expect("Can't serialize payload");
+                let rx_nic = netbench::read_nic_timestamp(&msg, timestamp_type);
 
-                rx_nic = netbench::read_nic_timestamp(&msg, timestamp_type);
                 if received_num == 0 {
                     debug!("Client sent 0 timestamp, flushing logfile.");
                     let mut logfile = wtr.lock().unwrap();
                     logfile.flush().expect("Can't fliush logfile");
-                    state_machine = HandlerState::WaitForPacket;
                 } else {
-                    state_machine = HandlerState::SendReply(msg.address.expect("Need a recipient"));
+                    let mst = MessageState::new(
+                        received_num,
+                        msg.address.expect("Need a recipient"),
+                        rx_app,
+                        rx_nic,
+                        rx_ht,
+                    );
+                    send_state.push_back(mst);
                 }
             }
 
             // Send a packet
             if event.readiness().is_writable() {
-                if let HandlerState::SendReply(addr) = state_machine {
-                    tx_app = netbench::now();
+                send_state.pop_front().map(|mut st| {
+                    st.timestamps.tx_app = netbench::now();
+                    recv_buf.clear();
+                    recv_buf
+                        .write_u64::<BigEndian>(st.id)
+                        .expect("Can't serialize payload");
 
                     let bytes_sent = socket::sendto(
                         mio_socket.as_raw_fd(),
                         &recv_buf,
-                        &addr,
+                        &st.sender,
                         socket::MsgFlags::empty(),
                     ).expect("Sending packet failed.");
 
+                    debug!("sent reply");
                     assert_eq!(bytes_sent, 8);
-                    state_machine = HandlerState::ReadSentTimestamp;
-                };
+                    ts_state.push_back(st);
+                });
             }
         }
     }
@@ -230,21 +250,20 @@ fn parse_args(
         _ => unreachable!("Invalid CLI argument, may be clap bug if possible_values doesn't work?"),
     };
 
-    let address = if matches.is_present("iface") {
-        unsafe {
-            let interface_addr = netbench::getifaceaddr(interface.as_ptr());
-            match socket::SockAddr::from_libc_sockaddr(&interface_addr) {
-                Some(socket::SockAddr::Inet(s)) => {
-                    let mut addr = s.to_std();
-                    addr.set_port(port);
-                    debug!("Found address {} for {}", addr, iface);
-                    addr
-                }
-                _ => panic!("Could not find address for {:?}", iface),
+    let address = unsafe {
+        let interface_addr = netbench::getifaceaddr(interface.as_ptr());
+        match socket::SockAddr::from_libc_sockaddr(&interface_addr) {
+            Some(socket::SockAddr::Inet(s)) => {
+                let mut addr = s.to_std();
+                addr.set_port(port);
+                debug!("Found address {} for {}", addr, iface);
+                addr
+            }
+            _ => {
+                warn!("Could not find address for {:?} using 0.0.0.0", iface);
+                net::SocketAddr::new(net::IpAddr::V4(net::Ipv4Addr::new(0, 0, 0, 0)), port)
             }
         }
-    } else {
-        net::SocketAddr::new(net::IpAddr::V4(net::Ipv4Addr::new(0, 0, 0, 0)), port)
     };
     let socket = net::UdpSocket::bind(address).expect("Couldn't bind to address");
 

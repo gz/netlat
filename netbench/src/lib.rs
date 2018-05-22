@@ -1,4 +1,5 @@
 ///! Just a bunch of useful function for benchmarking networks.
+extern crate byteorder;
 extern crate nix;
 #[macro_use]
 extern crate log;
@@ -8,13 +9,14 @@ extern crate ctrlc;
 #[macro_use]
 extern crate serde_derive;
 
+use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex};
 
 use nix::libc;
 use nix::sys::socket;
 use nix::sys::time;
 
-use std::os::unix::io::RawFd;
+use byteorder::{BigEndian, ReadBytesExt};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize)]
 pub enum PacketTimestamp {
@@ -80,17 +82,23 @@ pub fn retrieve_tx_timestamp(
     method: PacketTimestamp,
 ) -> (u64, u64) {
     use nix::sys::uio;
-    let mut buf = [8; u8];
-    let mut iovec = [uio::IoVec::from_mut_slice(&mut buf)];
+    // 14-byte Ethernet header
+    // 20-byte IP header
+    // 8-byte UDP header
+    const PACKET_HEADERS: usize = 14 + 20 + 8;
+    let mut recv_buf: [u8; PACKET_HEADERS + 8] = [0; PACKET_HEADERS + 8];
 
     let msg = socket::recvmsg(
         sock,
-        &iovec,
+        &[uio::IoVec::from_mut_slice(&mut recv_buf)],
         Some(cmsg_space),
         socket::MsgFlags::MSG_ERRQUEUE,
     ).expect("Can't receive on error queue");
 
-    let payload_id = iovec[0].read_u64::<BigEndian>();
+    let payload_id = recv_buf[PACKET_HEADERS..]
+        .as_ref()
+        .read_u64::<BigEndian>()
+        .expect("Can't read ID?");
     (payload_id, read_nic_timestamp(&msg, method))
 }
 
@@ -176,7 +184,7 @@ pub fn create_writer(logfile: String, capacity: usize) -> Arc<Mutex<csv::Writer<
 }
 
 #[cfg(target_os = "linux")]
-pub fn pin_thread(core_id: Vec<usize>) {
+pub fn pin_thread(core_ids: Vec<usize>) {
     use nix::sched::{sched_setaffinity, CpuSet};
     use nix::unistd::getpid;
 

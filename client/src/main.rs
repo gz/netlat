@@ -12,7 +12,7 @@ extern crate nix;
 use std::collections::HashMap;
 use std::net;
 use std::os::unix::io::AsRawFd;
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -32,15 +32,23 @@ enum HandlerState {
     ReadSentTimestamp,
 }
 
+#[derive(Debug)]
 struct MessageState {
     timestamps: netbench::LogRecord,
 }
 
 impl MessageState {
-    pub fn new(tx_app: u64) -> MessageState {
+    fn new(tx_app: u64) -> MessageState {
         let mut ms: MessageState = Default::default();
         ms.timestamps.tx_app = tx_app;
         ms
+    }
+
+    fn complete(&self, timestamp_type: netbench::PacketTimestamp) -> bool {
+        let nic_ts_done = timestamp_type == netbench::PacketTimestamp::None
+            || self.timestamps.tx_nic != 0 && self.timestamps.rx_nic != 0;
+        let app_ts_done = self.timestamps.rx_app != 0 && self.timestamps.tx_app != 0;
+        return nic_ts_done && app_ts_done;
     }
 }
 
@@ -126,6 +134,40 @@ fn parse_args(
     (sockets, suffix, timestamp, requests, flood_mode)
 }
 
+fn log_packet(
+    wtr: &Arc<Mutex<csv::Writer<std::fs::File>>>,
+    record: &netbench::LogRecord,
+    packets: &mut u64,
+) {
+    let mut logfile = wtr.lock().unwrap();
+    logfile.serialize(&record).expect("Can't write record.");
+    *packets = *packets + 1;
+}
+
+fn end_network_loop(
+    wtr: &Arc<Mutex<csv::Writer<std::fs::File>>>,
+    mio_socket: &mio::net::UdpSocket,
+    destination: &net::SocketAddr,
+) {
+    let mut logfile = wtr.lock().unwrap();
+    logfile.flush().expect("Can't flush the log");
+    debug!("Sender for {} done.", destination);
+    // We're done sending requests, stop
+    let mut packet_buffer = Vec::with_capacity(8);
+
+    // Send 0 packet to rserver so it flushed the log
+    packet_buffer
+        .write_u64::<BigEndian>(0)
+        .expect("Serialize time");
+
+    socket::send(
+        mio_socket.as_raw_fd(),
+        &packet_buffer,
+        socket::MsgFlags::empty(),
+    ).expect("Sending packet failed.");
+    packet_buffer.clear();
+}
+
 fn network_loop(
     barrier: std::sync::Arc<std::sync::Barrier>,
     destination: net::SocketAddr,
@@ -160,7 +202,7 @@ fn network_loop(
 
     let timeout = Duration::from_millis(500); // After 500ms we consider the UDP packet lost
     let mut last_sent = Instant::now();
-    let mut packet_count = 0;
+    let mut packet_count: u64 = 0;
 
     let mut time_rx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
     let mut time_tx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
@@ -197,52 +239,40 @@ fn network_loop(
 
                 message_state.insert(tx_app, MessageState::new(tx_app));
                 state_machine = HandlerState::WaitForReply;
+                debug!("Sent packet {}", tx_app);
             }
 
             if (state_machine == HandlerState::ReadSentTimestamp || flood)
                 && (mio::unix::UnixReady::from(event.readiness()).is_error()
                     || timestamp_type == netbench::PacketTimestamp::None)
             {
-                debug!("Reading timestamp");
                 let (id, tx_nic) = netbench::retrieve_tx_timestamp(
                     mio_socket.as_raw_fd(),
                     &mut time_tx,
                     timestamp_type,
                 );
 
-                let mut mst = message_state
-                    .remove(&id)
-                    .expect("Need to have package state");
-                mst.timestamps.tx_nic = tx_nic;
+                let completed_record = {
+                    let mut mst = message_state
+                        .get_mut(&id)
+                        .expect("Can't find state timestamped packet");
+                    mst.timestamps.tx_nic = tx_nic;
+                    mst.complete(timestamp_type)
+                };
 
-                // Log all the timestamps
-                let mut logfile = wtr.lock().unwrap();
-                logfile
-                    .serialize(&mst.timestamps)
-                    .expect("Can't write record.");
-                message_state.remove(&id);
+                if completed_record {
+                    let mst = message_state
+                        .remove(&id)
+                        .expect("Can't remove complete packet");
 
-                packet_count = packet_count + 1;
-                if packet_count == requests {
-                    logfile.flush().expect("Can't flush the log");
-                    debug!("Sender for {} done.", destination);
-                    // We're done sending requests, stop
-
-                    // Send 0 packet to rserver so it flushed the log
-                    packet_buffer
-                        .write_u64::<BigEndian>(0)
-                        .expect("Serialize time");
-
-                    socket::send(
-                        mio_socket.as_raw_fd(),
-                        &packet_buffer,
-                        socket::MsgFlags::empty(),
-                    ).expect("Sending packet failed.");
-
-                    return;
-                } else {
-                    // Send another packet
-                    state_machine = HandlerState::SendPacket;
+                    log_packet(&wtr, &mst.timestamps, &mut packet_count);
+                    if packet_count == requests {
+                        end_network_loop(&wtr, &mio_socket, &destination);
+                        return;
+                    } else {
+                        // Send another packet
+                        state_machine = HandlerState::SendPacket;
+                    }
                 }
             }
 
@@ -250,8 +280,6 @@ fn network_loop(
             if (state_machine == HandlerState::WaitForReply || flood)
                 && event.readiness().is_readable()
             {
-                debug!("Received ts packet");
-
                 // Get the packet
                 let msg = socket::recvmsg(
                     mio_socket.as_raw_fd(),
@@ -259,21 +287,39 @@ fn network_loop(
                     Some(&mut time_rx),
                     socket::MsgFlags::empty(),
                 ).expect("Can't receive message");
+                assert!(msg.bytes == 8);
                 let sent = recv_buf
                     .as_slice()
                     .read_u64::<BigEndian>()
                     .expect("Can't parse timestamp");
 
-                let mut mst = message_state
-                    .get_mut(&sent)
-                    .expect("Need to have package state");
-                mst.timestamps.rx_app = netbench::now();
-                mst.timestamps.rx_nic = netbench::read_nic_timestamp(&msg, timestamp_type);
-                assert!(msg.bytes == 8);
+                debug!("Received ts packet {}", sent);
 
-                // Sanity check that we measure the packet we sent...
-                assert!(sent == mst.timestamps.tx_app);
-                state_machine = HandlerState::ReadSentTimestamp;
+                let completed_record = {
+                    let mut mst = message_state
+                        .get_mut(&sent)
+                        .expect("Can't find state for incoming packet");
+                    mst.timestamps.rx_app = netbench::now();
+                    mst.timestamps.rx_nic = netbench::read_nic_timestamp(&msg, timestamp_type);
+                    // Sanity check that we measure the packet we sent...
+                    assert!(sent == mst.timestamps.tx_app);
+                    mst.complete(timestamp_type)
+                };
+
+                if completed_record {
+                    let mst = message_state
+                        .remove(&sent)
+                        .expect("Can't remove complete packet");
+                    debug!("Completed package {}", mst);
+                    log_packet(&wtr, &mst.timestamps, &mut packet_count);
+                    if packet_count == requests {
+                        end_network_loop(&wtr, &mio_socket, &destination);
+                        return;
+                    } else {
+                        // Send another packet
+                        state_machine = HandlerState::ReadSentTimestamp;
+                    }
+                }
             }
         }
 
