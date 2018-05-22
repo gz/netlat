@@ -34,20 +34,22 @@ enum HandlerState {
 
 #[derive(Debug)]
 struct MessageState {
-    timestamps: netbench::LogRecord,
+    log: netbench::LogRecord,
 }
 
 impl MessageState {
-    fn new(tx_app: u64) -> MessageState {
+    fn new(id: u64, tx_app: u64) -> MessageState {
         let mut ms: MessageState = Default::default();
-        ms.timestamps.tx_app = tx_app;
+        ms.log.id = id;
+        ms.log.tx_app = tx_app;
+        ms.log.completed = false;
         ms
     }
 
     fn complete(&self, timestamp_type: netbench::PacketTimestamp) -> bool {
         let nic_ts_done = timestamp_type == netbench::PacketTimestamp::None
-            || self.timestamps.tx_nic != 0 && self.timestamps.rx_nic != 0;
-        let app_ts_done = self.timestamps.rx_app != 0 && self.timestamps.tx_app != 0;
+            || self.log.tx_nic != 0 && self.log.rx_nic != 0;
+        let app_ts_done = self.log.rx_app != 0 && self.log.tx_app != 0;
         return nic_ts_done && app_ts_done;
     }
 }
@@ -55,7 +57,7 @@ impl MessageState {
 impl Default for MessageState {
     fn default() -> MessageState {
         MessageState {
-            timestamps: Default::default(),
+            log: Default::default(),
         }
     }
 }
@@ -146,10 +148,17 @@ fn log_packet(
 
 fn end_network_loop(
     wtr: &Arc<Mutex<csv::Writer<std::fs::File>>>,
+    lost_messages: HashMap<u64, MessageState>,
     mio_socket: &mio::net::UdpSocket,
     destination: &net::SocketAddr,
 ) {
     let mut logfile = wtr.lock().unwrap();
+
+    // Log the still outstanding messages (these were lost or dropped)
+    for (_id, mst) in &lost_messages {
+        logfile.serialize(&mst.log).expect("Can't write record.");
+    }
+
     logfile.flush().expect("Can't flush the log");
     debug!("Sender for {} done.", destination);
     // We're done sending requests, stop
@@ -202,7 +211,8 @@ fn network_loop(
 
     let timeout = Duration::from_millis(500); // After 500ms we consider the UDP packet lost
     let mut last_sent = Instant::now();
-    let mut packet_count: u64 = 0;
+    let mut packet_count: u64 = 0; // Number of packets completed
+    let mut packet_id: u64 = 1; // Unique ID included in every packet (must start at one since ID zero signals end of test on server)
 
     let mut time_rx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
     let mut time_tx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
@@ -224,7 +234,7 @@ fn network_loop(
                 let tx_app = netbench::now();
 
                 packet_buffer
-                    .write_u64::<BigEndian>(tx_app)
+                    .write_u64::<BigEndian>(packet_id)
                     .expect("Serialize time");
 
                 let bytes_sent = socket::send(
@@ -237,7 +247,9 @@ fn network_loop(
                 packet_buffer.clear();
                 last_sent = Instant::now();
 
-                message_state.insert(tx_app, MessageState::new(tx_app));
+                message_state.insert(tx_app, MessageState::new(packet_id, tx_app));
+                packet_id = packet_id + 1;
+
                 state_machine = HandlerState::WaitForReply;
                 debug!("Sent packet {}", tx_app);
             }
@@ -256,18 +268,18 @@ fn network_loop(
                     let mut mst = message_state
                         .get_mut(&id)
                         .expect("Can't find state timestamped packet");
-                    mst.timestamps.tx_nic = tx_nic;
+                    mst.log.tx_nic = tx_nic;
                     mst.complete(timestamp_type)
                 };
 
                 if completed_record {
-                    let mst = message_state
+                    let mut mst = message_state
                         .remove(&id)
                         .expect("Can't remove complete packet");
-
-                    log_packet(&wtr, &mst.timestamps, &mut packet_count);
+                    mst.log.completed = true;
+                    log_packet(&wtr, &mst.log, &mut packet_count);
                     if packet_count == requests {
-                        end_network_loop(&wtr, &mio_socket, &destination);
+                        end_network_loop(&wtr, message_state, &mio_socket, &destination);
                         return;
                     } else {
                         // Send another packet
@@ -299,21 +311,21 @@ fn network_loop(
                     let mut mst = message_state
                         .get_mut(&sent)
                         .expect("Can't find state for incoming packet");
-                    mst.timestamps.rx_app = netbench::now();
-                    mst.timestamps.rx_nic = netbench::read_nic_timestamp(&msg, timestamp_type);
+                    mst.log.rx_app = netbench::now();
+                    mst.log.rx_nic = netbench::read_nic_timestamp(&msg, timestamp_type);
                     // Sanity check that we measure the packet we sent...
-                    assert!(sent == mst.timestamps.tx_app);
+                    assert!(sent == mst.log.tx_app);
                     mst.complete(timestamp_type)
                 };
 
                 if completed_record {
-                    let mst = message_state
+                    let mut mst = message_state
                         .remove(&sent)
                         .expect("Can't remove complete packet");
-                    log_packet(&wtr, &mst.timestamps, &mut packet_count);
+                    mst.log.completed = true;
+                    log_packet(&wtr, &mst.log, &mut packet_count);
                     if packet_count == requests {
-                        end_network_loop(&wtr, &mio_socket, &destination);
-                        println!("inflight message: {:?}", message_state.len());
+                        end_network_loop(&wtr, message_state, &mio_socket, &destination);
                         return;
                     } else {
                         // Send another packet
@@ -341,7 +353,7 @@ fn main() {
 
     let yaml = load_yaml!("cli.yml");
     let matches = App::from_yaml(yaml).get_matches();
-    let (sockets, suffix, timestamps, requests, flood_mode) = parse_args(&matches);
+    let (sockets, suffix, log, requests, flood_mode) = parse_args(&matches);
 
     debug!("Got {} recipients to send to.", sockets.len());
 
@@ -360,7 +372,7 @@ fn main() {
                 socket,
                 suffix,
                 requests,
-                timestamps,
+                log,
                 flood_mode,
             )
         }));

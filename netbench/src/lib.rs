@@ -16,8 +16,6 @@ use nix::libc;
 use nix::sys::socket;
 use nix::sys::time;
 
-use byteorder::{BigEndian, ReadBytesExt};
-
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize)]
 pub enum PacketTimestamp {
     None,
@@ -52,6 +50,8 @@ pub unsafe fn enable_packet_timestamps(
 ///  * Transmit timestamp on NIC (HW or SW)
 #[derive(Debug, Eq, PartialEq, Serialize, Default)]
 pub struct LogRecord {
+    /// ID that uniquely identifies the packet (generated at the client, sent with packet)
+    pub id: u64,
     /// Timestamp (ns) when packet is recveived at application (immediately after recv call returns)
     pub rx_app: u64,
     /// Timestamp (ns) when packet is recveived on the NIC (either taken by NIC HW or driver SW)
@@ -62,6 +62,8 @@ pub struct LogRecord {
     pub tx_nic: u64,
     /// Time received at the HT in case `smt` mode is used in rserver (otherwise 0)
     pub rx_ht: u64,
+    /// Packet was sueccessfully handled by the application
+    pub completed: bool,
 }
 
 /// Transform timespec to nanoseconds.
@@ -81,7 +83,9 @@ pub fn retrieve_tx_timestamp(
     cmsg_space: &mut socket::CmsgSpace<[time::TimeVal; 3]>,
     method: PacketTimestamp,
 ) -> (u64, u64) {
+    use byteorder::{BigEndian, ReadBytesExt};
     use nix::sys::uio;
+
     // 14-byte Ethernet header
     // 20-byte IP header
     // 8-byte UDP header

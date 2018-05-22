@@ -33,9 +33,8 @@ const PONG: mio::Token = mio::Token(0);
 
 #[derive(Debug)]
 struct MessageState {
-    id: u64,
     sender: socket::SockAddr,
-    timestamps: netbench::LogRecord,
+    log: netbench::LogRecord,
 }
 
 impl MessageState {
@@ -46,15 +45,16 @@ impl MessageState {
         rx_nic: u64,
         rx_ht: u64,
     ) -> MessageState {
-        let mut timestamps: netbench::LogRecord = Default::default();
-        timestamps.rx_app = rx_app;
-        timestamps.rx_nic = rx_nic;
-        timestamps.rx_ht = rx_ht;
+        let mut log: netbench::LogRecord = Default::default();
+        log.id = id;
+        log.rx_app = rx_app;
+        log.rx_nic = rx_nic;
+        log.rx_ht = rx_ht;
+        log.completed = false;
 
         MessageState {
-            id: id,
             sender: sender,
-            timestamps: timestamps,
+            log: log,
         }
     }
 }
@@ -109,13 +109,13 @@ fn network_loop(
                     },
                     |st| {
                         debug!("Reading timestamp");
-                        assert!(id == st.id);
-                        st.timestamps.tx_nic = tx_nic;
+                        assert!(id == st.log.id);
+                        st.log.tx_nic = tx_nic;
+                        st.log.completed = true;
+
                         // Log all the timestamps
                         let mut logfile = wtr.lock().unwrap();
-                        logfile
-                            .serialize(&st.timestamps)
-                            .expect("Can't write record.");
+                        logfile.serialize(&st.log).expect("Can't write record.");
 
                         packet_count = packet_count + 1;
                     },
@@ -135,28 +135,36 @@ fn network_loop(
                 ).expect("Can't receive message");
                 let rx_app = netbench::now();
                 assert!(msg.bytes == 8);
-                let mut received_num = recv_buf
+                let mut packet_id = recv_buf
                     .as_slice()
                     .read_u64::<BigEndian>()
                     .expect("Can't parse timestamp");
 
                 let rx_ht = app_channel.as_ref().map_or(0, |(txp, rxp)| {
-                    txp.send(received_num)
+                    txp.send(packet_id)
                         .expect("Can't forward data to the app thread over channel.");
                     let (payload, tst) = rxp.recv().expect("Can't receive data");
-                    received_num = payload;
+                    packet_id = payload;
                     tst
                 });
 
                 let rx_nic = netbench::read_nic_timestamp(&msg, timestamp_type);
 
-                if received_num == 0 {
-                    debug!("Client sent 0 timestamp, flushing logfile.");
+                if packet_id == 0 {
+                    debug!("Client sent 0, flushing logfile.");
                     let mut logfile = wtr.lock().unwrap();
+
+                    // Log packets that probably didn't make it back
+                    for packet in &send_state {
+                        logfile.serialize(&packet.log).expect("Can't write record.");
+                    }
+                    for (_id, packet) in &ts_state {
+                        logfile.serialize(&packet.log).expect("Can't write record.");
+                    }
                     logfile.flush().expect("Can't fliush logfile");
                 } else {
                     let mst = MessageState::new(
-                        received_num,
+                        packet_id,
                         msg.address.expect("Need a recipient"),
                         rx_app,
                         rx_nic,
@@ -169,10 +177,10 @@ fn network_loop(
             // Send a packet
             if event.readiness().is_writable() {
                 send_state.pop_front().map(|mut st| {
-                    st.timestamps.tx_app = netbench::now();
+                    st.log.tx_app = netbench::now();
                     recv_buf.clear();
                     recv_buf
-                        .write_u64::<BigEndian>(st.id)
+                        .write_u64::<BigEndian>(st.log.id)
                         .expect("Can't serialize payload");
 
                     let bytes_sent = socket::sendto(
@@ -184,7 +192,7 @@ fn network_loop(
 
                     debug!("sent reply");
                     assert_eq!(bytes_sent, 8);
-                    ts_state.insert(st.id, st);
+                    ts_state.insert(st.log.id, st);
                 });
             }
         }
