@@ -310,15 +310,17 @@ fn network_loop(
                     let mst = message_state
                         .remove(&sent)
                         .expect("Can't remove complete packet");
-                    debug!("Completed package {}", mst);
                     log_packet(&wtr, &mst.timestamps, &mut packet_count);
                     if packet_count == requests {
                         end_network_loop(&wtr, &mio_socket, &destination);
+                        println!("inflight message: {:?}", message_state.len());
                         return;
                     } else {
                         // Send another packet
-                        state_machine = HandlerState::ReadSentTimestamp;
+                        state_machine = HandlerState::WaitForReply;
                     }
+                } else {
+                    state_machine = HandlerState::ReadSentTimestamp;
                 }
             }
         }

@@ -10,7 +10,7 @@ extern crate mio;
 extern crate netbench;
 extern crate nix;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net;
 use std::ops::Add;
 use std::os::unix::io::AsRawFd;
@@ -90,31 +90,36 @@ fn network_loop(
     // If this fails think about allocating it on the heap instead of copy?
     assert!(std::mem::size_of::<MessageState>() < 256);
     let mut send_state: VecDeque<MessageState> = VecDeque::with_capacity(1024);
-    let mut ts_state: VecDeque<MessageState> = VecDeque::with_capacity(1024);
+    let mut ts_state: HashMap<u64, MessageState> = HashMap::with_capacity(1024);
 
     loop {
         poll.poll(&mut events, Some(std::time::Duration::from_millis(100)))
             .expect("Can't poll channel");
         for event in events.iter() {
             if UnixReady::from(event.readiness()).is_error() {
-                ts_state.pop_front().map(|mut st| {
-                    debug!("Reading timestamp");
-                    let (id, tx_nic) = netbench::retrieve_tx_timestamp(
-                        mio_socket.as_raw_fd(),
-                        &mut time_tx,
-                        timestamp_type,
-                    );
-                    println!("{} {}", id, st.id);
-                    assert!(id == st.id);
-                    st.timestamps.tx_nic = tx_nic;
-                    // Log all the timestamps
-                    let mut logfile = wtr.lock().unwrap();
-                    logfile
-                        .serialize(&st.timestamps)
-                        .expect("Can't write record.");
+                let (id, tx_nic) = netbench::retrieve_tx_timestamp(
+                    mio_socket.as_raw_fd(),
+                    &mut time_tx,
+                    timestamp_type,
+                );
 
-                    packet_count = packet_count + 1;
-                });
+                ts_state.get_mut(&id).map_or_else(
+                    || {
+                        panic!("Packet state for id {} not found?", id);
+                    },
+                    |st| {
+                        debug!("Reading timestamp");
+                        assert!(id == st.id);
+                        st.timestamps.tx_nic = tx_nic;
+                        // Log all the timestamps
+                        let mut logfile = wtr.lock().unwrap();
+                        logfile
+                            .serialize(&st.timestamps)
+                            .expect("Can't write record.");
+
+                        packet_count = packet_count + 1;
+                    },
+                );
             }
 
             // Receive a packet
@@ -179,7 +184,7 @@ fn network_loop(
 
                     debug!("sent reply");
                     assert_eq!(bytes_sent, 8);
-                    ts_state.push_back(st);
+                    ts_state.insert(st.id, st);
                 });
             }
         }
