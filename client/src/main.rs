@@ -247,7 +247,7 @@ fn network_loop(
                 packet_buffer.clear();
                 last_sent = Instant::now();
 
-                message_state.insert(tx_app, MessageState::new(packet_id, tx_app));
+                message_state.insert(packet_id, MessageState::new(packet_id, tx_app));
                 packet_id = packet_id + 1;
 
                 state_machine = HandlerState::WaitForReply;
@@ -300,27 +300,27 @@ fn network_loop(
                     socket::MsgFlags::empty(),
                 ).expect("Can't receive message");
                 assert!(msg.bytes == 8);
-                let sent = recv_buf
+                let id = recv_buf
                     .as_slice()
                     .read_u64::<BigEndian>()
                     .expect("Can't parse timestamp");
 
-                debug!("Received ts packet {}", sent);
+                debug!("Received ts packet {}", id);
 
                 let completed_record = {
                     let mut mst = message_state
-                        .get_mut(&sent)
+                        .get_mut(&id)
                         .expect("Can't find state for incoming packet");
                     mst.log.rx_app = netbench::now();
                     mst.log.rx_nic = netbench::read_nic_timestamp(&msg, timestamp_type);
                     // Sanity check that we measure the packet we sent...
-                    assert!(sent == mst.log.tx_app);
+                    assert!(id == mst.log.id);
                     mst.complete(timestamp_type)
                 };
 
                 if completed_record {
                     let mut mst = message_state
-                        .remove(&sent)
+                        .remove(&id)
                         .expect("Can't remove complete packet");
                     mst.log.completed = true;
                     log_packet(&wtr, &mst.log, &mut packet_count);
