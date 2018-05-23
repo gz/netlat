@@ -62,15 +62,34 @@ impl Default for MessageState {
     }
 }
 
-fn parse_args(
-    matches: &clap::ArgMatches,
-) -> (
-    Vec<(net::SocketAddr, net::UdpSocket)>,
-    String,
-    netbench::PacketTimestamp,
-    u64,
-    bool,
-) {
+#[derive(Clone)]
+struct AppConfig {
+    name: String,
+    interface: String,
+    requests: u64,
+    timestamping: netbench::PacketTimestamp,
+    flood: bool,
+}
+
+impl AppConfig {
+    fn new(
+        name: String,
+        interface: String,
+        requests: u64,
+        timestamping: netbench::PacketTimestamp,
+        flood: bool,
+    ) -> AppConfig {
+        AppConfig {
+            name: name,
+            interface: interface,
+            requests: requests,
+            timestamping: timestamping,
+            flood: flood,
+        }
+    }
+}
+
+fn parse_args(matches: &clap::ArgMatches) -> (Vec<(net::SocketAddr, net::UdpSocket)>, AppConfig) {
     let recipients = values_t!(matches, "destinations", String)
         .unwrap_or(vec![String::from("192.168.0.7:3400")]);
     let iface = String::from(matches.value_of("iface").unwrap_or("enp216s0f1"));
@@ -133,7 +152,10 @@ fn parse_args(
         })
         .collect();
 
-    (sockets, suffix, timestamp, requests, flood_mode)
+    (
+        sockets,
+        AppConfig::new(suffix, iface, requests, timestamp, flood_mode),
+    )
 }
 
 fn log_packet(
@@ -151,6 +173,7 @@ fn end_network_loop(
     lost_messages: HashMap<u64, MessageState>,
     mio_socket: &mio::net::UdpSocket,
     destination: &net::SocketAddr,
+    _config: &AppConfig,
 ) {
     let mut logfile = wtr.lock().unwrap();
 
@@ -181,17 +204,18 @@ fn network_loop(
     barrier: std::sync::Arc<std::sync::Barrier>,
     destination: net::SocketAddr,
     socket: net::UdpSocket,
-    suffix: String,
-    requests: u64,
-    timestamp_type: netbench::PacketTimestamp,
-    flood: bool,
+    config: AppConfig,
 ) {
-    let output = format!("latencies-client-{}-{}.csv", destination.port(), suffix);
+    let output = format!(
+        "latencies-client-{}-{}.csv",
+        destination.port(),
+        config.name
+    );
     let wtr = netbench::create_writer(output.clone(), 50 * 1024 * 1024);
 
     println!(
         "Sending {} requests to {} writing latencies to {} (flood = {})",
-        requests, destination, output, flood
+        config.requests, destination, output, config.flood
     );
 
     let mio_socket = mio::net::UdpSocket::from_socket(socket).expect("Can make socket");
@@ -228,7 +252,7 @@ fn network_loop(
             .expect("Can't poll channel");
         for event in events.iter() {
             // Send a packet
-            if (state_machine == HandlerState::SendPacket || flood)
+            if (state_machine == HandlerState::SendPacket || config.flood)
                 && event.readiness().is_writable()
             {
                 let tx_app = netbench::now();
@@ -251,35 +275,34 @@ fn network_loop(
                 packet_id = packet_id + 1;
 
                 state_machine = HandlerState::WaitForReply;
-                debug!("Sent packet {}", tx_app);
+                debug!("Sent packet {}", packet_id);
             }
 
-            if (state_machine == HandlerState::ReadSentTimestamp || flood)
-                && (mio::unix::UnixReady::from(event.readiness()).is_error()
-                    || timestamp_type == netbench::PacketTimestamp::None)
+            if (state_machine == HandlerState::ReadSentTimestamp || config.flood)
+                && mio::unix::UnixReady::from(event.readiness()).is_error()
             {
                 let (id, tx_nic) = netbench::retrieve_tx_timestamp(
                     mio_socket.as_raw_fd(),
                     &mut time_tx,
-                    timestamp_type,
+                    config.timestamping,
                 );
 
                 let completed_record = {
                     let mut mst = message_state
                         .get_mut(&id)
-                        .expect("Can't find state timestamped packet");
+                        .expect(format!("Can't find state for packet {}", id).as_str());
                     mst.log.tx_nic = tx_nic;
-                    mst.complete(timestamp_type)
+                    mst.complete(config.timestamping)
                 };
 
                 if completed_record {
                     let mut mst = message_state
                         .remove(&id)
-                        .expect("Can't remove complete packet");
+                        .expect("Can't remove completed packet");
                     mst.log.completed = true;
                     log_packet(&wtr, &mst.log, &mut packet_count);
-                    if packet_count == requests {
-                        end_network_loop(&wtr, message_state, &mio_socket, &destination);
+                    if packet_count == config.requests {
+                        end_network_loop(&wtr, message_state, &mio_socket, &destination, &config);
                         return;
                     } else {
                         // Send another packet
@@ -289,7 +312,7 @@ fn network_loop(
             }
 
             // Receive a packet
-            if (state_machine == HandlerState::WaitForReply || flood)
+            if (state_machine == HandlerState::WaitForReply || config.flood)
                 && event.readiness().is_readable()
             {
                 // Get the packet
@@ -305,17 +328,17 @@ fn network_loop(
                     .read_u64::<BigEndian>()
                     .expect("Can't parse timestamp");
 
-                debug!("Received ts packet {}", id);
+                debug!("Received packet {}", id);
 
                 let completed_record = {
                     let mut mst = message_state
                         .get_mut(&id)
                         .expect("Can't find state for incoming packet");
                     mst.log.rx_app = netbench::now();
-                    mst.log.rx_nic = netbench::read_nic_timestamp(&msg, timestamp_type);
+                    mst.log.rx_nic = netbench::read_nic_timestamp(&msg, config.timestamping);
                     // Sanity check that we measure the packet we sent...
                     assert!(id == mst.log.id);
-                    mst.complete(timestamp_type)
+                    mst.complete(config.timestamping)
                 };
 
                 if completed_record {
@@ -324,8 +347,8 @@ fn network_loop(
                         .expect("Can't remove complete packet");
                     mst.log.completed = true;
                     log_packet(&wtr, &mst.log, &mut packet_count);
-                    if packet_count == requests {
-                        end_network_loop(&wtr, message_state, &mio_socket, &destination);
+                    if packet_count == config.requests {
+                        end_network_loop(&wtr, message_state, &mio_socket, &destination, &config);
                         return;
                     } else {
                         // Send another packet
@@ -342,7 +365,11 @@ fn network_loop(
             error!("Not getting any replies?");
             // Make sure we read the timestamp of the dropped packet so error queue is clear again
             // I guess this is the proper way to do it...
-            netbench::retrieve_tx_timestamp(mio_socket.as_raw_fd(), &mut time_tx, timestamp_type);
+            netbench::retrieve_tx_timestamp(
+                mio_socket.as_raw_fd(),
+                &mut time_tx,
+                config.timestamping,
+            );
             state_machine = HandlerState::SendPacket;
         }
     }
@@ -353,28 +380,20 @@ fn main() {
 
     let yaml = load_yaml!("cli.yml");
     let matches = App::from_yaml(yaml).get_matches();
-    let (sockets, suffix, log, requests, flood_mode) = parse_args(&matches);
+    let (connections, config) = parse_args(&matches);
 
-    debug!("Got {} recipients to send to.", sockets.len());
+    debug!("Got {} recipients to send to.", connections.len());
 
-    let barrier = Arc::new(Barrier::new(sockets.len()));
-    let mut handles = Vec::with_capacity(sockets.len());
+    let barrier = Arc::new(Barrier::new(connections.len()));
+    let mut handles = Vec::with_capacity(connections.len());
 
     // Spawn a new thread for every client
-    for (destination, socket) in sockets {
+    for (destination, socket) in connections {
         let barrier = barrier.clone();
-        let suffix = suffix.clone();
+        let config = config.clone();
 
         handles.push(thread::spawn(move || {
-            network_loop(
-                barrier,
-                destination,
-                socket,
-                suffix,
-                requests,
-                log,
-                flood_mode,
-            )
+            network_loop(barrier, destination, socket, config)
         }));
     }
 

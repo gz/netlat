@@ -30,7 +30,7 @@ args:
         takes_value: true
         possible_values: [ "hardware", "software", "none" ]
     - iface:
-        help: Which interface the server should use.
+        help: Which interface the client should use.
         long: iface
         short: i
         value_name: INTERFACE
