@@ -103,11 +103,11 @@ fn network_loop(
                     timestamp_type,
                 );
 
-                ts_state.get_mut(&id).map_or_else(
+                ts_state.remove(&id).map_or_else(
                     || {
                         panic!("Packet state for id {} not found?", id);
                     },
-                    |st| {
+                    |mut st| {
                         debug!("Reading timestamp");
                         assert!(id == st.log.id);
                         st.log.tx_nic = tx_nic;
