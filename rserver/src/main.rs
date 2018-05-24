@@ -329,7 +329,7 @@ fn main() {
         address, pin_to
     );
 
-    if let Some(_) = matches.subcommand_matches("smtconfig") {
+    if let Some(_) = matches.subcommand_matches("smt") {
         println!(
             "Listening on {} with threads spawned on {:?}.",
             address, pin_to
