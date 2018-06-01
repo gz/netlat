@@ -29,7 +29,7 @@ Use `cargo run --release -- --help` for more information.
 Send 100000 requests to the server listening on `192.168.1.40:3400` over our local interface `enp216s0f1`, store result in `latencies-client-3400-test.csv`:
 
 ```
-cd client; cargo run -- --iface enp216s0f1 -t hardware -r 100000 -p 192.168.1.40:3400 -s test
+cd client; cargo run --release -- --iface enp216s0f1 -t hardware -r 100000 -p 192.168.1.40:3400 -s test
 ```
 
 Use `cargo run --release -- --help` for more information.
