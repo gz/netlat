@@ -41,3 +41,10 @@ args:
         short: f
         long: flood
         required: false
+    - pin:
+        help: Pin the client to a particular core
+        value_name: COREID
+        long: pin
+        short: c
+        takes_value: true
+        required: false

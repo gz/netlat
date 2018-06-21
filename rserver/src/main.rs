@@ -295,7 +295,8 @@ fn parse_args(
     let pin_to: Option<(usize, usize)> = core_id.and_then(|c: u32| {
         // Get the SMT threads for the Core
         let topo = hwloc::Topology::new();
-        let core_depth = topo.depth_or_below_for_type(&hwloc::ObjectType::Core)
+        let core_depth = topo
+            .depth_or_below_for_type(&hwloc::ObjectType::Core)
             .unwrap();
         let all_cores = topo.objects_at_depth(core_depth);
 

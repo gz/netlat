@@ -8,10 +8,12 @@ extern crate env_logger;
 extern crate clap;
 extern crate netbench;
 extern crate nix;
+extern crate prctl;
 
 use std::collections::HashMap;
 use std::net;
 use std::os::unix::io::AsRawFd;
+use std::str::FromStr;
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -69,6 +71,7 @@ struct AppConfig {
     requests: u64,
     timestamping: netbench::PacketTimestamp,
     flood: bool,
+    core_id: Option<usize>,
 }
 
 impl AppConfig {
@@ -78,6 +81,7 @@ impl AppConfig {
         requests: u64,
         timestamping: netbench::PacketTimestamp,
         flood: bool,
+        core_id: Option<usize>,
     ) -> AppConfig {
         AppConfig {
             name: name,
@@ -85,6 +89,7 @@ impl AppConfig {
             requests: requests,
             timestamping: timestamping,
             flood: flood,
+            core_id: core_id,
         }
     }
 }
@@ -103,6 +108,9 @@ fn parse_args(matches: &clap::ArgMatches) -> (Vec<(net::SocketAddr, net::UdpSock
         _ => unreachable!("Invalid CLI argument, may be clap bug if possible_values doesn't work?"),
     };
     let flood_mode = matches.is_present("flood");
+    let core_id: Option<usize> = matches
+        .value_of("pin")
+        .and_then(|c: &str| usize::from_str(c).ok());
 
     let source_address: socket::SockAddr = {
         unsafe {
@@ -154,7 +162,7 @@ fn parse_args(matches: &clap::ArgMatches) -> (Vec<(net::SocketAddr, net::UdpSock
 
     (
         sockets,
-        AppConfig::new(suffix, iface, requests, timestamp, flood_mode),
+        AppConfig::new(suffix, iface, requests, timestamp, flood_mode, core_id),
     )
 }
 
@@ -198,6 +206,27 @@ fn end_network_loop(
         socket::MsgFlags::empty(),
     ).expect("Sending packet failed.");
     packet_buffer.clear();
+}
+// We make sure the recvmsg calls don't get inlined here this makes it easier for the tracing infrastructure...
+#[inline(never)]
+fn recvmsg<'msg>(
+    mio_socket: &mio::net::UdpSocket,
+    recv_buf: &'msg mut Vec<u8>,
+    time_rx: &'msg mut socket::CmsgSpace<[time::TimeVal; 3]>,
+) -> (u64, nix::sys::socket::RecvMsg<'msg>) {
+    let msg = socket::recvmsg(
+        mio_socket.as_raw_fd(),
+        &[uio::IoVec::from_mut_slice(recv_buf)],
+        Some(time_rx),
+        socket::MsgFlags::empty(),
+    ).expect("Can't receive message");
+    assert!(msg.bytes == 8);
+
+    let id = recv_buf
+        .as_slice()
+        .read_u64::<BigEndian>()
+        .expect("Can't parse timestamp");
+    (id, msg)
 }
 
 fn network_loop(
@@ -255,6 +284,9 @@ fn network_loop(
             if (state_machine == HandlerState::SendPacket || config.flood)
                 && event.readiness().is_writable()
             {
+                // Temporarily change process name (for better traceability with)
+                prctl::set_name(format!("pkt-{}", packet_id).as_str())
+                    .expect("Can't set process name");
                 let tx_app = netbench::now();
 
                 packet_buffer
@@ -316,25 +348,14 @@ fn network_loop(
                 && event.readiness().is_readable()
             {
                 // Get the packet
-                let msg = socket::recvmsg(
-                    mio_socket.as_raw_fd(),
-                    &[uio::IoVec::from_mut_slice(&mut recv_buf)],
-                    Some(&mut time_rx),
-                    socket::MsgFlags::empty(),
-                ).expect("Can't receive message");
-                assert!(msg.bytes == 8);
-                let id = recv_buf
-                    .as_slice()
-                    .read_u64::<BigEndian>()
-                    .expect("Can't parse timestamp");
-
+                let (id, msg) = recvmsg(&mio_socket, &mut recv_buf, &mut time_rx);
                 debug!("Received packet {}", id);
-
                 let completed_record = {
                     let mut mst = message_state
                         .get_mut(&id)
                         .expect("Can't find state for incoming packet");
                     mst.log.rx_app = netbench::now();
+                    prctl::set_name("netbench").expect("Can't set process name");
                     mst.log.rx_nic = netbench::read_nic_timestamp(&msg, config.timestamping);
                     // Sanity check that we measure the packet we sent...
                     assert!(id == mst.log.id);
@@ -376,6 +397,9 @@ fn network_loop(
 }
 
 fn main() {
+    /*unsafe {
+        nix::libc::prctl(nix::libc::PR_TASK_PERF_EVENTS_DISABLE);
+    }*/
     env_logger::init();
 
     let yaml = load_yaml!("cli.yml");
@@ -388,16 +412,35 @@ fn main() {
     let mut handles = Vec::with_capacity(connections.len());
 
     // Spawn a new thread for every client
-    for (destination, socket) in connections {
-        let barrier = barrier.clone();
-        let config = config.clone();
+    if connections.len() > 1 {
+        println!("making some threads");
+        for (destination, socket) in connections {
+            let barrier = barrier.clone();
+            let config = config.clone();
 
-        handles.push(thread::spawn(move || {
-            network_loop(barrier, destination, socket, config)
-        }));
-    }
+            handles.push(thread::spawn(move || {
+                config.core_id.map(|id: usize| {
+                    debug!("Pin to core {}.", id);
+                    netbench::pin_thread(vec![id]);
+                });
 
-    for handle in handles {
-        handle.join().unwrap();
+                network_loop(barrier, destination, socket, config)
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    } else if connections.len() == 1 {
+        // Don't spawn a thread, less of a nightmare with perf...
+        config.core_id.map(|id: usize| {
+            debug!("Pin to core {}.", id);
+            netbench::pin_thread(vec![id]);
+        });
+        for (destination, socket) in connections {
+            let barrier = barrier.clone();
+            let config = config.clone();
+            network_loop(barrier, destination, socket, config);
+        }
     }
 }

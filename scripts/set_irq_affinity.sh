@@ -137,11 +137,17 @@ set_affinity()
 	1)
 		printf "%s %d %s -> /sys/class/net/%s/queues/tx-%d/xps_cpus\n" $IFACE $core $MASK $IFACE $((n-1))
 		printf "%s" $MASK > /sys/class/net/$IFACE/queues/tx-$((n-1))/xps_cpus
+
+		printf "%s %d %s -> /sys/class/net/%s/queues/rx-%d/rps_cpus\n" $IFACE $core $MASK $IFACE $((n-1))
+		printf "%s" $MASK > /sys/class/net/$IFACE/queues/rx-$((n-1))/rps_cpus
 	;;
 	2)
 		MASK=0
 		printf "%s %d %s -> /sys/class/net/%s/queues/tx-%d/xps_cpus\n" $IFACE $core $MASK $IFACE $((n-1))
 		printf "%s" $MASK > /sys/class/net/$IFACE/queues/tx-$((n-1))/xps_cpus
+
+		printf "%s %d %s -> /sys/class/net/%s/queues/rx-%d/rps_cpus\n" $IFACE $core $MASK $IFACE $((n-1))
+		printf "%s" $MASK > /sys/class/net/$IFACE/queues/rx-$((n-1))/rps_cpus
 	;;
 	*)
 	esac
