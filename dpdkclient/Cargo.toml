@@ -1,0 +1,24 @@
+[package]
+name = "dpdknetlat"
+version = "0.1.0"
+authors = ["Gerd Zellweger <mail@gerdzellweger.com>"]
+
+[dependencies]
+netbench = { path = "../netbench" }
+byteorder = "*"
+csv = "1"
+serde = "*"
+serde_derive = "*"
+clap = { version = "2.31", features = ["yaml"] }
+log = { version = "0.4", features = ["max_level_debug", "release_max_level_warn"] }
+env_logger = "*"
+prctl = "*"
+libc = "0.2"
+getopts = "0.2"
+lazy_static ="0.2"
+
+[dependencies.rust-dpdk]
+git = "https://github.com/gz/rust-dpdk.git"
+
+[dependencies.pnet]
+version = "0.21.0"
