@@ -373,9 +373,12 @@ fn network_loop(
                         return;
                     } else {
                         // Send another packet
-                        state_machine = HandlerState::WaitForReply;
+                        state_machine = HandlerState::SendPacket;
                     }
                 } else {
+                    #[cfg(feature = "vma")]
+                    unreachable!();
+
                     state_machine = HandlerState::ReadSentTimestamp;
                 }
             }
