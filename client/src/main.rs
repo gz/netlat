@@ -25,6 +25,8 @@ use nix::sys::socket;
 use nix::sys::time;
 use nix::sys::uio;
 
+use netbench::Connection;
+
 const PING: mio::Token = mio::Token(0);
 
 #[derive(Debug, Eq, PartialEq)]
@@ -37,6 +39,7 @@ enum HandlerState {
 #[derive(Debug)]
 struct MessageState {
     log: netbench::LogRecord,
+    nic_ts_set: usize,
 }
 
 impl MessageState {
@@ -48,9 +51,18 @@ impl MessageState {
         ms
     }
 
+    fn set_tx_nic(&mut self, tx_nic: u64) {
+        self.log.tx_nic = tx_nic;
+        self.nic_ts_set += 1;
+    }
+
+    fn set_rx_nic(&mut self, rx_nic: u64) {
+        self.log.rx_nic = rx_nic;
+        self.nic_ts_set += 1;
+    }
+
     fn complete(&self, timestamp_type: netbench::PacketTimestamp) -> bool {
-        let nic_ts_done = timestamp_type == netbench::PacketTimestamp::None
-            || self.log.tx_nic != 0 && self.log.rx_nic != 0;
+        let nic_ts_done = timestamp_type == netbench::PacketTimestamp::None || self.nic_ts_set == 2;
         let app_ts_done = self.log.rx_app != 0 && self.log.tx_app != 0;
         return nic_ts_done && app_ts_done;
     }
@@ -60,6 +72,7 @@ impl Default for MessageState {
     fn default() -> MessageState {
         MessageState {
             log: Default::default(),
+            nic_ts_set: 0,
         }
     }
 }
@@ -94,7 +107,7 @@ impl AppConfig {
     }
 }
 
-fn parse_args(matches: &clap::ArgMatches) -> (Vec<(net::SocketAddr, net::UdpSocket)>, AppConfig) {
+fn parse_args(matches: &clap::ArgMatches) -> (Vec<(net::SocketAddr, Connection)>, AppConfig) {
     let recipients = values_t!(matches, "destinations", String)
         .unwrap_or(vec![String::from("192.168.0.7:3400")]);
     let iface = String::from(matches.value_of("iface").unwrap_or("enp216s0f1"));
@@ -108,6 +121,8 @@ fn parse_args(matches: &clap::ArgMatches) -> (Vec<(net::SocketAddr, net::UdpSock
         _ => unreachable!("Invalid CLI argument, may be clap bug if possible_values doesn't work?"),
     };
     let flood_mode = matches.is_present("flood");
+    let tcp = matches.is_present("tcp");
+
     let core_id: Option<usize> = matches
         .value_of("pin")
         .and_then(|c: &str| usize::from_str(c).ok());
@@ -120,40 +135,64 @@ fn parse_args(matches: &clap::ArgMatches) -> (Vec<(net::SocketAddr, net::UdpSock
     };
 
     let start_src_port: u16 = 5000;
-    let sockets = recipients
+    let connections = recipients
         .iter()
         .enumerate()
         .map(|(i, recipient)| {
             match source_address {
                 socket::SockAddr::Inet(s) => {
-                    // Construct socket on correct interface
-                    let mut addr = s.to_std();
-                    addr.set_port(start_src_port + i as u16);
-                    let sender = net::UdpSocket::bind(addr).expect("Can't bind");
-
-                    // Enable timestamping for the socket
-                    unsafe {
-                        let r = netbench::enable_packet_timestamps(
-                            sender.as_raw_fd(),
-                            interface.as_ptr(),
-                            timestamp,
-                        );
-                        if r != 0 {
-                            panic!(
-                                "HW timstamping enable failed (ret {}): {}",
-                                r,
-                                nix::errno::Errno::last()
-                            );
-                        }
-                    }
-
-                    // Connect to server
                     let destination = recipient.parse().expect("Invalid host:port pair");
-                    sender
-                        .connect(destination)
-                        .expect("Can't connect to server");
 
-                    return (destination, sender);
+                    let connection = if tcp {
+                        debug!("Opening a TCP connection");
+                        let stream = mio::net::TcpStream::connect(&destination)
+                            .expect("Couldn't connect to TCP stream.");
+                        //stream.set_nodelay(true);
+                        unsafe {
+                            let r = netbench::enable_packet_timestamps(
+                                stream.as_raw_fd(),
+                                interface.as_ptr(),
+                                timestamp,
+                            );
+                            if r != 0 {
+                                panic!(
+                                    "Failed to enable NIC timestamps (ret {}): {}",
+                                    r,
+                                    nix::errno::Errno::last()
+                                );
+                            }
+                        }
+                        Connection::Stream(stream)
+                    } else {
+                        debug!("Opening a UDP connection");
+                        // Construct socket on correct interface
+                        let mut addr = s.to_std();
+                        addr.set_port(start_src_port + i as u16);
+
+                        let socket = mio::net::UdpSocket::bind(&addr)
+                            .expect("Couldn't bind UDP socket to address.");
+                        unsafe {
+                            let r = netbench::enable_packet_timestamps(
+                                socket.as_raw_fd(),
+                                interface.as_ptr(),
+                                timestamp,
+                            );
+                            if r != 0 {
+                                panic!(
+                                    "Failed to enable NIC timestamps (ret {}): {}",
+                                    r,
+                                    nix::errno::Errno::last()
+                                );
+                            }
+                        }
+                        socket
+                            .connect(destination)
+                            .expect("Can't connect to server");
+
+                        Connection::Datagram(socket)
+                    };
+
+                    return (destination, connection);
                 }
                 _ => panic!("Got invalid address from iface"),
             };
@@ -161,7 +200,7 @@ fn parse_args(matches: &clap::ArgMatches) -> (Vec<(net::SocketAddr, net::UdpSock
         .collect();
 
     (
-        sockets,
+        connections,
         AppConfig::new(suffix, iface, requests, timestamp, flood_mode, core_id),
     )
 }
@@ -179,7 +218,7 @@ fn log_packet(
 fn end_network_loop(
     wtr: &Arc<Mutex<csv::Writer<std::fs::File>>>,
     lost_messages: HashMap<u64, MessageState>,
-    mio_socket: &mio::net::UdpSocket,
+    raw_fd: std::os::unix::io::RawFd,
     destination: &net::SocketAddr,
     _config: &AppConfig,
 ) {
@@ -200,22 +239,19 @@ fn end_network_loop(
         .write_u64::<BigEndian>(0)
         .expect("Serialize time");
 
-    socket::send(
-        mio_socket.as_raw_fd(),
-        &packet_buffer,
-        socket::MsgFlags::empty(),
-    ).expect("Sending packet failed.");
+    socket::send(raw_fd, &packet_buffer, socket::MsgFlags::empty())
+        .expect("Sending packet failed.");
     packet_buffer.clear();
 }
 // We make sure the recvmsg calls don't get inlined here this makes it easier for the tracing infrastructure...
 #[inline(never)]
 fn recvmsg<'msg>(
-    mio_socket: &mio::net::UdpSocket,
+    raw_fd: std::os::unix::io::RawFd,
     recv_buf: &'msg mut Vec<u8>,
     time_rx: &'msg mut socket::CmsgSpace<[time::TimeVal; 3]>,
 ) -> (u64, nix::sys::socket::RecvMsg<'msg>) {
     let msg = socket::recvmsg(
-        mio_socket.as_raw_fd(),
+        raw_fd,
         &[uio::IoVec::from_mut_slice(recv_buf)],
         Some(time_rx),
         socket::MsgFlags::empty(),
@@ -232,7 +268,7 @@ fn recvmsg<'msg>(
 fn network_loop(
     barrier: std::sync::Arc<std::sync::Barrier>,
     destination: net::SocketAddr,
-    socket: net::UdpSocket,
+    connection: Connection,
     config: AppConfig,
 ) {
     let output = format!(
@@ -247,22 +283,37 @@ fn network_loop(
         config.requests, destination, output, config.flood
     );
 
-    let mio_socket = mio::net::UdpSocket::from_socket(socket).expect("Can make socket");
     let poll = mio::Poll::new().expect("Can't create poll.");
-    poll.register(
-        &mio_socket,
-        PING,
-        mio::Ready::writable() | mio::Ready::readable() | mio::unix::UnixReady::error(),
-        mio::PollOpt::level(),
-    ).expect("Can't register send event.");
-
-    let mut packet_buffer = Vec::with_capacity(8);
     let mut events = mio::Events::with_capacity(1024);
 
+    let raw_fd: std::os::unix::io::RawFd = match connection {
+        Connection::Datagram(ref sock) => {
+            debug!("Register for UDP send/receive events");
+            poll.register(
+                sock,
+                PING,
+                mio::Ready::writable() | mio::Ready::readable() | mio::unix::UnixReady::error(),
+                mio::PollOpt::level(),
+            ).expect("Can't register send event.");
+            sock.as_raw_fd()
+        }
+        Connection::Stream(ref stream) => {
+            debug!("Register for TCP send/receive events");
+            poll.register(
+                stream,
+                PING,
+                mio::Ready::writable() | mio::Ready::readable() | mio::unix::UnixReady::error(),
+                mio::PollOpt::level(),
+            ).expect("Can't register send event.");
+            stream.as_raw_fd()
+        }
+    };
+
+    let mut packet_buffer = Vec::with_capacity(8);
     let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
     recv_buf.resize(8, 0);
 
-    let timeout = Duration::from_millis(500); // After 500ms we consider the UDP packet lost
+    let timeout = Duration::from_millis(1000); // After 1000ms we consider the packet lost
     let mut last_sent = Instant::now();
     let mut packet_count: u64 = 0; // Number of packets completed
     let mut packet_id: u64 = 1; // Unique ID included in every packet (must start at one since ID zero signals end of test on server)
@@ -277,9 +328,11 @@ fn network_loop(
     barrier.wait();
     debug!("Start sending...");
     loop {
-        poll.poll(&mut events, Some(Duration::from_millis(100)))
+        poll.poll(&mut events, Some(Duration::from_millis(1000)))
             .expect("Can't poll channel");
+        //debug!("events is = {:?}", events);
         for event in events.iter() {
+            //debug!("Got event is = {:?}", event);
             // Send a packet
             if (state_machine == HandlerState::SendPacket || config.flood)
                 && event.readiness().is_writable()
@@ -293,11 +346,8 @@ fn network_loop(
                     .write_u64::<BigEndian>(packet_id)
                     .expect("Serialize time");
 
-                let bytes_sent = socket::send(
-                    mio_socket.as_raw_fd(),
-                    &packet_buffer,
-                    socket::MsgFlags::empty(),
-                ).expect("Sending packet failed.");
+                let bytes_sent = socket::send(raw_fd, &packet_buffer, socket::MsgFlags::empty())
+                    .expect("Sending packet failed.");
 
                 assert_eq!(bytes_sent, 8);
                 packet_buffer.clear();
@@ -307,23 +357,26 @@ fn network_loop(
                 packet_id = packet_id + 1;
 
                 state_machine = HandlerState::WaitForReply;
-                debug!("Sent packet {}", packet_id);
+                debug!("Sent packet {}", packet_id - 1);
             }
 
             if (state_machine == HandlerState::ReadSentTimestamp || config.flood)
                 && mio::unix::UnixReady::from(event.readiness()).is_error()
             {
                 let (id, tx_nic) = netbench::retrieve_tx_timestamp(
-                    mio_socket.as_raw_fd(),
+                    raw_fd,
                     &mut time_tx,
                     config.timestamping,
+                    &connection,
                 );
+
+                debug!("Retrieve tx timestamp {} for id {}", tx_nic, id);
 
                 let completed_record = {
                     let mut mst = message_state
                         .get_mut(&id)
                         .expect(format!("Can't find state for packet {}", id).as_str());
-                    mst.log.tx_nic = tx_nic;
+                    mst.set_tx_nic(tx_nic);
                     mst.complete(config.timestamping)
                 };
 
@@ -334,7 +387,7 @@ fn network_loop(
                     mst.log.completed = true;
                     log_packet(&wtr, &mst.log, &mut packet_count);
                     if packet_count == config.requests {
-                        end_network_loop(&wtr, message_state, &mio_socket, &destination, &config);
+                        end_network_loop(&wtr, message_state, raw_fd, &destination, &config);
                         return;
                     } else {
                         // Send another packet
@@ -348,7 +401,7 @@ fn network_loop(
                 && event.readiness().is_readable()
             {
                 // Get the packet
-                let (id, msg) = recvmsg(&mio_socket, &mut recv_buf, &mut time_rx);
+                let (id, msg) = recvmsg(raw_fd, &mut recv_buf, &mut time_rx);
                 debug!("Received packet {}", id);
                 let completed_record = {
                     let mut mst = message_state
@@ -356,7 +409,7 @@ fn network_loop(
                         .expect("Can't find state for incoming packet");
                     mst.log.rx_app = netbench::now();
                     prctl::set_name("netbench").expect("Can't set process name");
-                    mst.log.rx_nic = netbench::read_nic_timestamp(&msg, config.timestamping);
+                    mst.set_rx_nic(netbench::read_nic_timestamp(&msg, config.timestamping));
                     // Sanity check that we measure the packet we sent...
                     assert!(id == mst.log.id);
                     mst.complete(config.timestamping)
@@ -369,16 +422,14 @@ fn network_loop(
                     mst.log.completed = true;
                     log_packet(&wtr, &mst.log, &mut packet_count);
                     if packet_count == config.requests {
-                        end_network_loop(&wtr, message_state, &mio_socket, &destination, &config);
+                        end_network_loop(&wtr, message_state, raw_fd, &destination, &config);
                         return;
                     } else {
-                        // Send another packet
+                        debug!("Send another packet");
                         state_machine = HandlerState::SendPacket;
                     }
                 } else {
-                    #[cfg(feature = "vma")]
-                    unreachable!();
-
+                    debug!("Trying to fetch timestamp for packet");
                     state_machine = HandlerState::ReadSentTimestamp;
                 }
             }
@@ -389,11 +440,7 @@ fn network_loop(
             error!("Not getting any replies?");
             // Make sure we read the timestamp of the dropped packet so error queue is clear again
             // I guess this is the proper way to do it...
-            netbench::retrieve_tx_timestamp(
-                mio_socket.as_raw_fd(),
-                &mut time_tx,
-                config.timestamping,
-            );
+            netbench::retrieve_tx_timestamp(raw_fd, &mut time_tx, config.timestamping, &connection);
             state_machine = HandlerState::SendPacket;
         }
     }

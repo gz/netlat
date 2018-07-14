@@ -12,6 +12,7 @@ serde = "*"
 csv = "1"
 ctrlc = { version = "3", features = ["termination"] }
 byteorder = "*"
+mio = "*"
 
 [build-dependencies]
 cc = "1"

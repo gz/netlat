@@ -18,6 +18,8 @@ use std::str::FromStr;
 use std::sync::mpsc;
 use std::thread;
 
+use netbench::Connection;
+
 use nix::sys::socket;
 use nix::sys::time;
 use nix::sys::uio;
@@ -33,14 +35,14 @@ const PONG: mio::Token = mio::Token(0);
 
 #[derive(Debug)]
 struct MessageState {
-    sender: socket::SockAddr,
+    sender: Option<socket::SockAddr>,
     log: netbench::LogRecord,
 }
 
 impl MessageState {
     fn new(
         id: u64,
-        sender: socket::SockAddr,
+        sender: Option<socket::SockAddr>,
         rx_app: u64,
         rx_nic: u64,
         rx_ht: u64,
@@ -61,7 +63,7 @@ impl MessageState {
 
 fn network_loop(
     address: net::SocketAddr,
-    socket: net::UdpSocket,
+    connection: Connection,
     suffix: String,
     timestamp_type: netbench::PacketTimestamp,
     app_channel: Option<(mpsc::Sender<u64>, mpsc::Receiver<(u64, u64)>)>,
@@ -69,14 +71,29 @@ fn network_loop(
     let logfile = format!("latencies-rserver-{}-{}.csv", address.port(), suffix);
     let wtr = netbench::create_writer(logfile.clone(), 50 * 1024 * 1024);
 
-    let mio_socket = mio::net::UdpSocket::from_socket(socket).expect("Can make socket");
     let poll = mio::Poll::new().expect("Can't create poll.");
-    poll.register(
-        &mio_socket,
-        PONG,
-        Ready::writable() | Ready::readable() | UnixReady::error(),
-        mio::PollOpt::level(),
-    ).expect("Can't register send event.");
+
+    let raw_fd: std::os::unix::io::RawFd = match connection {
+        Connection::Datagram(ref socket) => {
+            poll.register(
+                socket,
+                PONG,
+                Ready::writable() | Ready::readable() | UnixReady::error(),
+                mio::PollOpt::level(),
+            ).expect("Can't register send event.");
+            socket.as_raw_fd()
+        }
+        Connection::Stream(ref stream) => {
+            debug!("Register for polled events");
+            poll.register(
+                stream,
+                PONG,
+                Ready::writable() | Ready::readable() | UnixReady::error(),
+                mio::PollOpt::level(),
+            ).expect("Can't register send event.");
+            stream.as_raw_fd()
+        }
+    };
 
     let mut events = mio::Events::with_capacity(1024);
     let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
@@ -98,11 +115,13 @@ fn network_loop(
         for event in events.iter() {
             if UnixReady::from(event.readiness()).is_error() {
                 let (id, tx_nic) = netbench::retrieve_tx_timestamp(
-                    mio_socket.as_raw_fd(),
+                    raw_fd,
                     &mut time_tx,
                     timestamp_type,
+                    &connection,
                 );
 
+                debug!("read from err queue id={} tx_nic={}", id, tx_nic);
                 ts_state.remove(&id).map_or_else(
                     || {
                         panic!("Packet state for id {} not found?", id);
@@ -124,21 +143,25 @@ fn network_loop(
 
             // Receive a packet
             if event.readiness().is_readable() {
-                debug!("Received packet {}", packet_count);
-
+                debug!("Read packet");
                 // Get the packet
                 let msg = socket::recvmsg(
-                    mio_socket.as_raw_fd(),
+                    raw_fd,
                     &[uio::IoVec::from_mut_slice(&mut recv_buf)],
                     Some(&mut time_rx),
                     socket::MsgFlags::empty(),
                 ).expect("Can't receive message");
+                if msg.bytes == 0 {
+                    // In TCP 0 means sender shut down the connection, we're done here.
+                    return;
+                }
                 let rx_app = netbench::now();
-                assert!(msg.bytes == 8);
+                assert_eq!(msg.bytes, 8, "Message payload got {} bytes", msg.bytes);
                 let mut packet_id = recv_buf
                     .as_slice()
                     .read_u64::<BigEndian>()
                     .expect("Can't parse timestamp");
+                debug!("Received packet {} id={}", packet_count, packet_id);
 
                 let rx_ht = app_channel.as_ref().map_or(0, |(txp, rxp)| {
                     txp.send(packet_id)
@@ -149,6 +172,7 @@ fn network_loop(
                 });
 
                 let rx_nic = netbench::read_nic_timestamp(&msg, timestamp_type);
+                debug!("Got rx_nic = {}", rx_nic);
 
                 if packet_id == 0 {
                     debug!("Client sent 0, flushing logfile.");
@@ -163,13 +187,7 @@ fn network_loop(
                     }
                     logfile.flush().expect("Can't fliush logfile");
                 } else {
-                    let mst = MessageState::new(
-                        packet_id,
-                        msg.address.expect("Need a recipient"),
-                        rx_app,
-                        rx_nic,
-                        rx_ht,
-                    );
+                    let mst = MessageState::new(packet_id, msg.address, rx_app, rx_nic, rx_ht);
                     send_state.push_back(mst);
                 }
             }
@@ -183,12 +201,17 @@ fn network_loop(
                         .write_u64::<BigEndian>(st.log.id)
                         .expect("Can't serialize payload");
 
-                    let bytes_sent = socket::sendto(
-                        mio_socket.as_raw_fd(),
-                        &recv_buf,
-                        &st.sender,
-                        socket::MsgFlags::empty(),
-                    ).expect("Sending packet failed.");
+                    let bytes_sent = if st.sender.is_some() {
+                        socket::sendto(
+                            raw_fd,
+                            &recv_buf,
+                            &st.sender.unwrap(),
+                            socket::MsgFlags::empty(),
+                        ).expect("sendto call for packet failed.")
+                    } else {
+                        socket::send(raw_fd, &recv_buf, socket::MsgFlags::empty())
+                            .expect("send call for packet failed.")
+                    };
 
                     debug!("sent reply");
                     assert_eq!(bytes_sent, 8);
@@ -201,7 +224,7 @@ fn network_loop(
 
 fn spawn_listen_pair(
     address: net::SocketAddr,
-    socket: net::UdpSocket,
+    connection: Connection,
     timestamp_type: netbench::PacketTimestamp,
     name: String,
     on_core: Option<(usize, usize)>,
@@ -233,7 +256,7 @@ fn spawn_listen_pair(
                 netbench::pin_thread(vec![ids.1]);
             });
             let channel = Some((txp, rxp));
-            network_loop(address, socket, name, timestamp_type, channel)
+            network_loop(address, connection, name, timestamp_type, channel)
         })
         .expect("Couldn't spawn a thread");
 
@@ -245,7 +268,7 @@ fn parse_args(
 ) -> (
     Option<(usize, usize)>,
     net::SocketAddr,
-    net::UdpSocket,
+    Connection,
     String,
     netbench::PacketTimestamp,
 ) {
@@ -262,6 +285,7 @@ fn parse_args(
         "none" => netbench::PacketTimestamp::None,
         _ => unreachable!("Invalid CLI argument, may be clap bug if possible_values doesn't work?"),
     };
+    let tcp: bool = matches.is_present("tcp");
 
     let address = unsafe {
         let interface_addr = netbench::getifaceaddr(interface.as_ptr());
@@ -278,19 +302,55 @@ fn parse_args(
             }
         }
     };
-    let socket = net::UdpSocket::bind(address).expect("Couldn't bind to address");
 
-    unsafe {
-        let r =
-            netbench::enable_packet_timestamps(socket.as_raw_fd(), interface.as_ptr(), timestamp);
-        if r != 0 {
-            panic!(
-                "Failed to enable NIC timestamps (ret {}): {}",
-                r,
-                nix::errno::Errno::last()
+    let connection = if tcp {
+        info!("Waiting for incoming TCP connection");
+        let listener =
+            std::net::TcpListener::bind(&address).expect("Couldn't connect to TCP stream.");
+        let (stream, addr) = listener.accept().expect("Waiting for incoming connection");
+        let stream = mio::net::TcpStream::from_stream(stream).expect("Make mio stream");
+        info!("Incoming connection from {}", addr);
+        unsafe {
+            let r = netbench::enable_packet_timestamps(
+                listener.as_raw_fd(),
+                interface.as_ptr(),
+                timestamp,
             );
+
+            let r = netbench::enable_packet_timestamps(
+                stream.as_raw_fd(),
+                interface.as_ptr(),
+                timestamp,
+            );
+            if r != 0 {
+                panic!(
+                    "Failed to enable NIC timestamps (ret {}): {}",
+                    r,
+                    nix::errno::Errno::last()
+                );
+            }
         }
-    }
+        Connection::Stream(stream)
+    } else {
+        debug!("Opeing a UDP connection");
+        let socket =
+            mio::net::UdpSocket::bind(&address).expect("Couldn't bind UDP socket to address.");
+        unsafe {
+            let r = netbench::enable_packet_timestamps(
+                socket.as_raw_fd(),
+                interface.as_ptr(),
+                timestamp,
+            );
+            if r != 0 {
+                panic!(
+                    "Failed to enable NIC timestamps (ret {}): {}",
+                    r,
+                    nix::errno::Errno::last()
+                );
+            }
+        }
+        Connection::Datagram(socket)
+    };
 
     let pin_to: Option<(usize, usize)> = core_id.and_then(|c: u32| {
         // Get the SMT threads for the Core
@@ -316,14 +376,14 @@ fn parse_args(
         None
     });
 
-    (pin_to, address, socket, suffix, timestamp)
+    (pin_to, address, connection, suffix, timestamp)
 }
 
 fn main() {
     env_logger::init();
     let yaml = load_yaml!("cli.yml");
     let matches = App::from_yaml(yaml).get_matches();
-    let (pin_to, address, socket, suffix, nic_timestamps) = parse_args(&matches);
+    let (pin_to, address, connection, suffix, nic_timestamps) = parse_args(&matches);
 
     println!(
         "Listening on {} with process affinity set to {:?}.",
@@ -335,7 +395,7 @@ fn main() {
             "Listening on {} with threads spawned on {:?}.",
             address, pin_to
         );
-        let (tapp, tpoll) = spawn_listen_pair(address, socket, nic_timestamps, suffix, pin_to);
+        let (tapp, tpoll) = spawn_listen_pair(address, connection, nic_timestamps, suffix, pin_to);
 
         tapp.join().expect("Can't join app-thread.");
         tpoll.join().expect("Can't join poll-thread.")
@@ -344,6 +404,6 @@ fn main() {
             netbench::pin_thread(vec![ids.0, ids.1]);
         });
         let mut channel = None;
-        network_loop(address, socket, suffix, nic_timestamps, channel);
+        network_loop(address, connection, suffix, nic_timestamps, channel);
     }
 }

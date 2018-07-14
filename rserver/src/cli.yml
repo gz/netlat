@@ -7,6 +7,10 @@ args:
         short: v
         multiple: true
         help: Sets the level of verbosity
+    - tcp:
+        help: Use TCP instead of UDP
+        long: tcp
+        multiple: false
     - name:
         help: Suffix for the output files
         short: s

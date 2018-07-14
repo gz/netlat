@@ -5,6 +5,7 @@ extern crate nix;
 extern crate log;
 extern crate csv;
 extern crate ctrlc;
+extern crate mio;
 
 #[macro_use]
 extern crate serde_derive;
@@ -15,6 +16,11 @@ use std::sync::{Arc, Mutex};
 use nix::libc;
 use nix::sys::socket;
 use nix::sys::time;
+
+pub enum Connection {
+    Datagram(mio::net::UdpSocket),
+    Stream(mio::net::TcpStream),
+}
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize)]
 pub enum PacketTimestamp {
@@ -82,15 +88,25 @@ pub fn retrieve_tx_timestamp(
     sock: RawFd,
     cmsg_space: &mut socket::CmsgSpace<[time::TimeVal; 3]>,
     method: PacketTimestamp,
+    connection: &Connection,
 ) -> (u64, u64) {
     use byteorder::{BigEndian, ReadBytesExt};
     use nix::sys::uio;
 
+    // XXX: find a better way to do this
     // 14-byte Ethernet header
     // 20-byte IP header
     // 8-byte UDP header
-    const PACKET_HEADERS: usize = 14 + 20 + 8;
-    let mut recv_buf: [u8; PACKET_HEADERS + 8] = [0; PACKET_HEADERS + 8];
+    const PACKET_HEADERS_UDP: usize = 14 + 20 + 8;
+    // or 32-byte TCP header
+    const PACKET_HEADERS_TCP: usize = 66;
+    let pkt_size = match connection {
+        Connection::Datagram(_) => PACKET_HEADERS_UDP + 8,
+        Connection::Stream(_) => PACKET_HEADERS_TCP + 8,
+    };
+    // Ugly allocation here due to not knowing tcp/udp at compile time:
+    let mut recv_buf: Vec<u8> = Vec::with_capacity(pkt_size);
+    recv_buf.resize(pkt_size, 0);
 
     let msg = socket::recvmsg(
         sock,
@@ -99,7 +115,8 @@ pub fn retrieve_tx_timestamp(
         socket::MsgFlags::MSG_ERRQUEUE,
     ).expect("Can't receive on error queue");
 
-    let payload_id = recv_buf[PACKET_HEADERS..]
+    debug!("msg = {:?}", msg.bytes);
+    let payload_id = recv_buf[pkt_size - 8..]
         .as_ref()
         .read_u64::<BigEndian>()
         .expect("Can't read ID?");
