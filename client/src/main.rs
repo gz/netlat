@@ -447,9 +447,6 @@ fn network_loop(
 }
 
 fn main() {
-    /*unsafe {
-        nix::libc::prctl(nix::libc::PR_TASK_PERF_EVENTS_DISABLE);
-    }*/
     env_logger::init();
 
     let yaml = load_yaml!("cli.yml");
