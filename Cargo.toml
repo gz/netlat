@@ -2,7 +2,7 @@
 
 members = [
     "client",
-    #"dpdkclient",
+    "dpdkclient",
     "rserver",
     "netbench"
 ]

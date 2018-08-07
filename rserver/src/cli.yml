@@ -35,6 +35,10 @@ args:
     - port:
         help: What port to listen on?
         required: false
+    - rt:
+        long: rt
+        help: Run as real time process
+        required: false
 subcommands:
     - smt:
         about: Run epoll and app logic on seperate hyperthreads.

@@ -84,6 +84,7 @@ struct AppConfig {
     requests: u64,
     timestamping: netbench::PacketTimestamp,
     flood: bool,
+    real_time: bool,
     core_id: Option<usize>,
 }
 
@@ -94,6 +95,7 @@ impl AppConfig {
         requests: u64,
         timestamping: netbench::PacketTimestamp,
         flood: bool,
+        rt: bool,
         core_id: Option<usize>,
     ) -> AppConfig {
         AppConfig {
@@ -102,6 +104,7 @@ impl AppConfig {
             requests: requests,
             timestamping: timestamping,
             flood: flood,
+            real_time: rt,
             core_id: core_id,
         }
     }
@@ -122,6 +125,7 @@ fn parse_args(matches: &clap::ArgMatches) -> (Vec<(net::SocketAddr, Connection)>
     };
     let flood_mode = matches.is_present("flood");
     let tcp = matches.is_present("tcp");
+    let rt = matches.is_present("rt");
 
     let core_id: Option<usize> = matches
         .value_of("pin")
@@ -201,7 +205,7 @@ fn parse_args(matches: &clap::ArgMatches) -> (Vec<(net::SocketAddr, Connection)>
 
     (
         connections,
-        AppConfig::new(suffix, iface, requests, timestamp, flood_mode, core_id),
+        AppConfig::new(suffix, iface, requests, timestamp, flood_mode, rt, core_id),
     )
 }
 
@@ -277,6 +281,9 @@ fn network_loop(
         config.name
     );
     let wtr = netbench::create_writer(output.clone(), 50 * 1024 * 1024);
+    if config.real_time {
+        netbench::set_rt_fifo();
+    }
 
     println!(
         "Sending {} requests to {} writing latencies to {} (flood = {})",

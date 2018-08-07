@@ -222,3 +222,21 @@ pub fn pin_thread(core_ids: Vec<usize>) {
 pub fn pin_thread(_core_id: Vec<usize>) {
     error!("Pinning threads not supported!");
 }
+
+#[cfg(target_os = "linux")]
+pub fn set_rt_fifo() {
+    unsafe {
+        let params = libc::sched_param {
+            sched_priority: 1i32,
+        };
+        let pid = libc::getpid();
+        let r = libc::sched_setscheduler(pid, libc::SCHED_FIFO, &params);
+        assert_eq!(r, 0, "libc::sched_setscheduler failed");
+        debug!("Running as real time prioriy process");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn set_rt_fifo() {
+    error!("set_rt_fifo not supported!");
+}

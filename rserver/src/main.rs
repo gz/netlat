@@ -286,6 +286,10 @@ fn parse_args(
         _ => unreachable!("Invalid CLI argument, may be clap bug if possible_values doesn't work?"),
     };
     let tcp: bool = matches.is_present("tcp");
+    let rt = matches.is_present("rt");
+    if rt {
+        netbench::set_rt_fifo();
+    }
 
     let address = unsafe {
         let interface_addr = netbench::getifaceaddr(interface.as_ptr());

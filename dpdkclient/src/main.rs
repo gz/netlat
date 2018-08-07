@@ -83,8 +83,8 @@ unsafe extern "C" fn l2fwd_main_loop(arg: *mut c_void) -> i32 {
 
     let txpool = dpdk::pktmbuf::pool_create(
         "tx",
-        8192,
-        256,
+        128 - 1,
+        64,
         0,
         ffi::RTE_MBUF_DEFAULT_BUF_SIZE as u16,
         dpdk::socket::id(),
@@ -244,8 +244,8 @@ fn main() {
 
         pool = dpdk::pktmbuf::pool_create(
             "mbp",
-            8192,
-            256,
+            128 - 1,
+            64,
             0,
             ffi::RTE_MBUF_DEFAULT_BUF_SIZE as u16,
             dpdk::socket::id(),

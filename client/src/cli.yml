@@ -52,3 +52,7 @@ args:
         short: c
         takes_value: true
         required: false
+    - rt:
+        long: rt
+        help: Run as real time process
+        required: false
