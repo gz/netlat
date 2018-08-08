@@ -13,7 +13,6 @@ extern crate prctl;
 use std::collections::HashMap;
 use std::net;
 use std::os::unix::io::AsRawFd;
-use std::str::FromStr;
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -25,6 +24,7 @@ use nix::sys::socket;
 use nix::sys::time;
 use nix::sys::uio;
 
+use netbench::AppConfig;
 use netbench::Connection;
 
 const PING: mio::Token = mio::Token(0);
@@ -77,60 +77,10 @@ impl Default for MessageState {
     }
 }
 
-#[derive(Clone)]
-struct AppConfig {
-    name: String,
-    interface: String,
-    requests: u64,
-    timestamping: netbench::PacketTimestamp,
-    flood: bool,
-    real_time: bool,
-    core_id: Option<usize>,
-}
-
-impl AppConfig {
-    fn new(
-        name: String,
-        interface: String,
-        requests: u64,
-        timestamping: netbench::PacketTimestamp,
-        flood: bool,
-        rt: bool,
-        core_id: Option<usize>,
-    ) -> AppConfig {
-        AppConfig {
-            name: name,
-            interface: interface,
-            requests: requests,
-            timestamping: timestamping,
-            flood: flood,
-            real_time: rt,
-            core_id: core_id,
-        }
-    }
-}
-
 fn parse_args(matches: &clap::ArgMatches) -> (Vec<(net::SocketAddr, Connection)>, AppConfig) {
-    let recipients = values_t!(matches, "destinations", String)
-        .unwrap_or(vec![String::from("192.168.0.7:3400")]);
-    let iface = String::from(matches.value_of("iface").unwrap_or("enp216s0f1"));
-    let interface = std::ffi::CString::new(iface.clone()).expect("Can't be null");
-    let suffix = value_t!(matches, "name", String).unwrap_or(String::from("none"));
-    let requests = value_t!(matches, "requests", u64).unwrap_or(250000);
-    let timestamp = match matches.value_of("timestamp").unwrap_or("hardware") {
-        "hardware" => netbench::PacketTimestamp::Hardware,
-        "software" => netbench::PacketTimestamp::Software,
-        "none" => netbench::PacketTimestamp::None,
-        _ => unreachable!("Invalid CLI argument, may be clap bug if possible_values doesn't work?"),
-    };
-    let flood_mode = matches.is_present("flood");
-    let tcp = matches.is_present("tcp");
-    let rt = matches.is_present("rt");
+    let config = AppConfig::parse(matches);
 
-    let core_id: Option<usize> = matches
-        .value_of("pin")
-        .and_then(|c: &str| usize::from_str(c).ok());
-
+    let interface = std::ffi::CString::new(config.interface.clone()).expect("Can't be null");
     let source_address: socket::SockAddr = {
         unsafe {
             let interface_addr = netbench::getifaceaddr(interface.as_ptr());
@@ -139,7 +89,8 @@ fn parse_args(matches: &clap::ArgMatches) -> (Vec<(net::SocketAddr, Connection)>
     };
 
     let start_src_port: u16 = 5000;
-    let connections = recipients
+    let connections = config
+        .destinations
         .iter()
         .enumerate()
         .map(|(i, recipient)| {
@@ -147,7 +98,7 @@ fn parse_args(matches: &clap::ArgMatches) -> (Vec<(net::SocketAddr, Connection)>
                 socket::SockAddr::Inet(s) => {
                     let destination = recipient.parse().expect("Invalid host:port pair");
 
-                    let connection = if tcp {
+                    let connection = if config.transport == netbench::Transport::Tcp {
                         debug!("Opening a TCP connection");
                         let stream = mio::net::TcpStream::connect(&destination)
                             .expect("Couldn't connect to TCP stream.");
@@ -156,7 +107,7 @@ fn parse_args(matches: &clap::ArgMatches) -> (Vec<(net::SocketAddr, Connection)>
                             let r = netbench::enable_packet_timestamps(
                                 stream.as_raw_fd(),
                                 interface.as_ptr(),
-                                timestamp,
+                                config.timestamp,
                             );
                             if r != 0 {
                                 panic!(
@@ -179,7 +130,7 @@ fn parse_args(matches: &clap::ArgMatches) -> (Vec<(net::SocketAddr, Connection)>
                             let r = netbench::enable_packet_timestamps(
                                 socket.as_raw_fd(),
                                 interface.as_ptr(),
-                                timestamp,
+                                config.timestamp,
                             );
                             if r != 0 {
                                 panic!(
@@ -203,10 +154,7 @@ fn parse_args(matches: &clap::ArgMatches) -> (Vec<(net::SocketAddr, Connection)>
         })
         .collect();
 
-    (
-        connections,
-        AppConfig::new(suffix, iface, requests, timestamp, flood_mode, rt, core_id),
-    )
+    (connections, config)
 }
 
 fn log_packet(
@@ -278,10 +226,10 @@ fn network_loop(
     let output = format!(
         "latencies-client-{}-{}.csv",
         destination.port(),
-        config.name
+        config.output
     );
     let wtr = netbench::create_writer(output.clone(), 50 * 1024 * 1024);
-    if config.real_time {
+    if config.scheduler == netbench::Scheduler::Fifo {
         netbench::set_rt_fifo();
     }
 
@@ -345,8 +293,7 @@ fn network_loop(
                 && event.readiness().is_writable()
             {
                 // Temporarily change process name (for better traceability with)
-                prctl::set_name(format!("pkt-{}", packet_id).as_str())
-                    .expect("Can't set process name");
+                netbench::set_process_name(format!("pkt-{}", packet_id).as_str());
                 let tx_app = netbench::now();
 
                 packet_buffer
@@ -373,7 +320,7 @@ fn network_loop(
                 let (id, tx_nic) = netbench::retrieve_tx_timestamp(
                     raw_fd,
                     &mut time_tx,
-                    config.timestamping,
+                    config.timestamp,
                     &connection,
                 );
 
@@ -384,7 +331,7 @@ fn network_loop(
                         .get_mut(&id)
                         .expect(format!("Can't find state for packet {}", id).as_str());
                     mst.set_tx_nic(tx_nic);
-                    mst.complete(config.timestamping)
+                    mst.complete(config.timestamp)
                 };
 
                 if completed_record {
@@ -415,11 +362,11 @@ fn network_loop(
                         .get_mut(&id)
                         .expect("Can't find state for incoming packet");
                     mst.log.rx_app = netbench::now();
-                    prctl::set_name("netbench").expect("Can't set process name");
-                    mst.set_rx_nic(netbench::read_nic_timestamp(&msg, config.timestamping));
+                    netbench::set_process_name("netbench");
+                    mst.set_rx_nic(netbench::read_nic_timestamp(&msg, config.timestamp));
                     // Sanity check that we measure the packet we sent...
                     assert!(id == mst.log.id);
-                    mst.complete(config.timestamping)
+                    mst.complete(config.timestamp)
                 };
 
                 if completed_record {
@@ -447,7 +394,7 @@ fn network_loop(
             error!("Not getting any replies?");
             // Make sure we read the timestamp of the dropped packet so error queue is clear again
             // I guess this is the proper way to do it...
-            netbench::retrieve_tx_timestamp(raw_fd, &mut time_tx, config.timestamping, &connection);
+            netbench::retrieve_tx_timestamp(raw_fd, &mut time_tx, config.timestamp, &connection);
             state_machine = HandlerState::SendPacket;
         }
     }

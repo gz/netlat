@@ -6,53 +6,54 @@ args:
     - verbose:
         short: v
         multiple: true
-        help: Sets the level of verbosity
-    - tcp:
-        help: Use TCP instead of UDP
-        long: tcp
+        help: Sets the level of verbosity.
+    - transport:
+        long: transport
+        help: Which transport protocol to use.
         multiple: false
-    - destinations:
-        help: Send to these addr:port pairs
-        short: p
-        multiple: true
         takes_value: true
-        required: false
-    - requests:
-        help: How many requests to send
-        short: r
-        takes_value: true
-        required: false
-    - name:
-        help: Suffix for the output files
-        short: s
+        value_name: PROTOCOL
+        possible_values: [ "tcp", "udp" ]
+    - output:
+        long: output
+        value_name: FILENAME
+        help: Output filename.
         takes_value: true
     - timestamp:
-        help: Choose timestamp method for NIC driver on socket for RX and TX paths and logs it.
-        short: t
-        long: timestamps
+        long: timestamp
+        help: Choose timestamping method for NIC driver at end of RX and TX paths.
         requires: iface
+        value_name: METHOD
         takes_value: true
         possible_values: [ "hardware", "software", "none" ]
     - iface:
-        help: Which interface the client should use.
+        help: Which interface the client should use (see ifconfig).
         long: iface
-        short: i
         value_name: INTERFACE
         takes_value: true
         required: false
-    - flood:
-        help: Don't wait for replies (open loop)
-        short: f
-        long: flood
-        required: false
     - pin:
-        help: Pin the client to a particular core
+        help: Pin the client to a particular core.
         value_name: COREID
         long: pin
-        short: c
         takes_value: true
         required: false
-    - rt:
-        long: rt
-        help: Run as real time process
+    - scheduler:
+        long: scheduler
+        help: Run as real time process.
+        value_name: CLASS
+        takes_value: true
+        possible_values: [ "none", "rt" ]
+    - requests:
+        help: How many requests to send.
+        takes_value: true
+        required: false
+    - flood:
+        help: Don't wait for replies (open loop).
+        long: flood
+        required: false
+    - destinations:
+        help: Send to these addr:port pairs.
+        multiple: true
+        takes_value: true
         required: false

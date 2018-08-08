@@ -6,11 +6,16 @@ extern crate log;
 extern crate csv;
 extern crate ctrlc;
 extern crate mio;
+extern crate prctl;
 
 #[macro_use]
 extern crate serde_derive;
 
+#[macro_use]
+extern crate clap;
+
 use std::os::unix::io::RawFd;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use nix::libc;
@@ -27,6 +32,91 @@ pub enum PacketTimestamp {
     None,
     Software,
     Hardware,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize)]
+pub enum Transport {
+    Udp,
+    Tcp,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize)]
+pub enum Scheduler {
+    None,
+    Fifo,
+}
+
+#[derive(Clone)]
+pub struct AppConfig {
+    pub interface: String,
+    pub output: String,
+    pub core_id: Option<usize>,
+
+    pub scheduler: Scheduler,
+    pub timestamp: PacketTimestamp,
+    pub transport: Transport,
+
+    // Server
+    pub port: u16,
+
+    // Client
+    pub requests: u64,
+    pub destinations: Vec<String>,
+    pub flood: bool,
+}
+
+impl AppConfig {
+    pub fn parse(matches: &clap::ArgMatches) -> AppConfig {
+        let iface = String::from(matches.value_of("iface").unwrap_or("enp216s0f1"));
+        let output = value_t!(matches, "output", String).unwrap_or(String::from("none"));
+        let core_id: Option<usize> = matches
+            .value_of("pin")
+            .and_then(|c: &str| usize::from_str(c).ok());
+
+        let timestamp = match matches.value_of("timestamp").unwrap_or("hardware") {
+            "hardware" => PacketTimestamp::Hardware,
+            "software" => PacketTimestamp::Software,
+            "none" => PacketTimestamp::None,
+            _ => unreachable!(
+                "Invalid CLI argument, may be clap bug if possible_values doesn't work?"
+            ),
+        };
+        let scheduler = match matches.value_of("scheduler").unwrap_or("none") {
+            "rt" => Scheduler::Fifo,
+            "none" => Scheduler::None,
+            _ => unreachable!(
+                "Invalid CLI argument, may be clap bug if possible_values doesn't work?"
+            ),
+        };
+        let transport = match matches.value_of("transport").unwrap_or("udp") {
+            "udp" => Transport::Udp,
+            "tcp" => Transport::Tcp,
+            _ => unreachable!(
+                "Invalid CLI argument, may be clap bug if possible_values doesn't work?"
+            ),
+        };
+
+        let requests = value_t!(matches, "requests", u64).unwrap_or(250000);
+        let destinations = values_t!(matches, "destinations", String)
+            .unwrap_or(vec![String::from("192.168.0.7:3400")]);
+        let flood_mode = matches.is_present("flood");
+
+        AppConfig {
+            interface: iface,
+            output: output,
+            core_id: core_id,
+
+            scheduler: scheduler,
+            timestamp: timestamp,
+            transport: transport,
+
+            port: 0,
+
+            requests: requests,
+            destinations: destinations,
+            flood: flood_mode,
+        }
+    }
 }
 
 extern "C" {
@@ -127,10 +217,10 @@ pub fn retrieve_tx_timestamp(
 pub fn retrieve_tx_timestamp(
     _sock: RawFd,
     _cmsg_space: &mut socket::CmsgSpace<[time::TimeVal; 3]>,
-    method: PacketTimestamp,
+    _method: PacketTimestamp,
+    _connection: &Connection,
 ) -> (u64, u64) {
     debug!("Can't retrieve timestamp on the current platform.");
-    assert!(method == PacketTimestamp::None);
     (0, 0)
 }
 
@@ -238,5 +328,15 @@ pub fn set_rt_fifo() {
 
 #[cfg(not(target_os = "linux"))]
 pub fn set_rt_fifo() {
-    error!("set_rt_fifo not supported!");
+    error!("set_rt_fifo is not supported in the current platform!");
+}
+
+#[cfg(target_os = "linux")]
+pub fn set_process_name(name: &str) {
+    prctl::set_name(name).expect("Can't set process name");
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn set_process_name(name: &str) {
+    error!("set_process_name is not supported on the current platform!");
 }
