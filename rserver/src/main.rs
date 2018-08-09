@@ -14,10 +14,10 @@ use std::collections::{HashMap, VecDeque};
 use std::net;
 use std::ops::Add;
 use std::os::unix::io::AsRawFd;
-use std::str::FromStr;
 use std::sync::mpsc;
 use std::thread;
 
+use netbench::AppConfig;
 use netbench::Connection;
 
 use nix::sys::socket;
@@ -62,13 +62,12 @@ impl MessageState {
 }
 
 fn network_loop(
+    config: &netbench::AppConfig,
     address: net::SocketAddr,
     connection: Connection,
-    suffix: String,
-    timestamp_type: netbench::PacketTimestamp,
     app_channel: Option<(mpsc::Sender<u64>, mpsc::Receiver<(u64, u64)>)>,
 ) {
-    let logfile = format!("latencies-rserver-{}-{}.csv", address.port(), suffix);
+    let logfile = format!("latencies-rserver-{}-{}.csv", address.port(), config.output);
     let wtr = netbench::create_writer(logfile.clone(), 50 * 1024 * 1024);
 
     let poll = mio::Poll::new().expect("Can't create poll.");
@@ -117,7 +116,7 @@ fn network_loop(
                 let (id, tx_nic) = netbench::retrieve_tx_timestamp(
                     raw_fd,
                     &mut time_tx,
-                    timestamp_type,
+                    config.timestamp,
                     &connection,
                 );
 
@@ -171,7 +170,7 @@ fn network_loop(
                     tst
                 });
 
-                let rx_nic = netbench::read_nic_timestamp(&msg, timestamp_type);
+                let rx_nic = netbench::read_nic_timestamp(&msg, config.timestamp);
                 debug!("Got rx_nic = {}", rx_nic);
 
                 if packet_id == 0 {
@@ -185,7 +184,7 @@ fn network_loop(
                     for (_id, packet) in &ts_state {
                         logfile.serialize(&packet.log).expect("Can't write record.");
                     }
-                    logfile.flush().expect("Can't fliush logfile");
+                    logfile.flush().expect("Can't flush logfile");
                 } else {
                     let mst = MessageState::new(packet_id, msg.address, rx_app, rx_nic, rx_ht);
                     send_state.push_back(mst);
@@ -223,140 +222,11 @@ fn network_loop(
 }
 
 fn spawn_listen_pair(
+    config: netbench::AppConfig,
     address: net::SocketAddr,
     connection: Connection,
-    timestamp_type: netbench::PacketTimestamp,
-    name: String,
-    on_core: Option<(usize, usize)>,
 ) -> (thread::JoinHandle<()>, thread::JoinHandle<()>) {
-    let (txa, rxp) = mpsc::channel();
-    let (txp, rxa) = mpsc::channel();
-
-    let t_app_name = name.clone().add("/app");
-    let t_app = thread::Builder::new()
-        .name(t_app_name)
-        .stack_size(4096 * 10)
-        .spawn(move || loop {
-            on_core.map(|ids: (usize, usize)| {
-                netbench::pin_thread(vec![ids.0]);
-            });
-
-            let payload = rxa.recv().expect("Can't receive data on app thread.");
-            txa.send((payload, netbench::now()))
-                .expect("Can't send data to network thread.");
-        })
-        .expect("Can't spawn application thread");
-
-    let t_poll_name = name.clone().add("/polling");
-    let t_poll = thread::Builder::new()
-        .name(t_poll_name)
-        .stack_size(4096 * 10)
-        .spawn(move || {
-            on_core.map(|ids: (usize, usize)| {
-                netbench::pin_thread(vec![ids.1]);
-            });
-            let channel = Some((txp, rxp));
-            network_loop(address, connection, name, timestamp_type, channel)
-        })
-        .expect("Couldn't spawn a thread");
-
-    (t_app, t_poll)
-}
-
-fn parse_args(
-    matches: &clap::ArgMatches,
-) -> (
-    Option<(usize, usize)>,
-    net::SocketAddr,
-    Connection,
-    String,
-    netbench::PacketTimestamp,
-) {
-    let core_id: Option<u32> = matches
-        .value_of("pin")
-        .and_then(|c: &str| u32::from_str(c).ok());
-    let iface = matches.value_of("iface").unwrap_or("enp216s0f1");
-    let interface = std::ffi::CString::new(iface).expect("Can't be null");
-    let port: u16 = u16::from_str(matches.value_of("port").unwrap_or("3400")).unwrap_or(3400);
-    let suffix = value_t!(matches, "name", String).unwrap_or(String::from("none"));
-    let timestamp = match matches.value_of("timestamp").unwrap_or("hardware") {
-        "hardware" => netbench::PacketTimestamp::Hardware,
-        "software" => netbench::PacketTimestamp::Software,
-        "none" => netbench::PacketTimestamp::None,
-        _ => unreachable!("Invalid CLI argument, may be clap bug if possible_values doesn't work?"),
-    };
-    let tcp: bool = matches.is_present("tcp");
-    let rt = matches.is_present("rt");
-    if rt {
-        netbench::set_rt_fifo();
-    }
-
-    let address = unsafe {
-        let interface_addr = netbench::getifaceaddr(interface.as_ptr());
-        match socket::SockAddr::from_libc_sockaddr(&interface_addr) {
-            Some(socket::SockAddr::Inet(s)) => {
-                let mut addr = s.to_std();
-                addr.set_port(port);
-                debug!("Found address {} for {}", addr, iface);
-                addr
-            }
-            _ => {
-                warn!("Could not find address for {:?} using 0.0.0.0", iface);
-                net::SocketAddr::new(net::IpAddr::V4(net::Ipv4Addr::new(0, 0, 0, 0)), port)
-            }
-        }
-    };
-
-    let connection = if tcp {
-        info!("Waiting for incoming TCP connection");
-        let listener =
-            std::net::TcpListener::bind(&address).expect("Couldn't connect to TCP stream.");
-        let (stream, addr) = listener.accept().expect("Waiting for incoming connection");
-        let stream = mio::net::TcpStream::from_stream(stream).expect("Make mio stream");
-        info!("Incoming connection from {}", addr);
-        unsafe {
-            let r = netbench::enable_packet_timestamps(
-                listener.as_raw_fd(),
-                interface.as_ptr(),
-                timestamp,
-            );
-
-            let r = netbench::enable_packet_timestamps(
-                stream.as_raw_fd(),
-                interface.as_ptr(),
-                timestamp,
-            );
-            if r != 0 {
-                panic!(
-                    "Failed to enable NIC timestamps (ret {}): {}",
-                    r,
-                    nix::errno::Errno::last()
-                );
-            }
-        }
-        Connection::Stream(stream)
-    } else {
-        debug!("Opeing a UDP connection");
-        let socket =
-            mio::net::UdpSocket::bind(&address).expect("Couldn't bind UDP socket to address.");
-        unsafe {
-            let r = netbench::enable_packet_timestamps(
-                socket.as_raw_fd(),
-                interface.as_ptr(),
-                timestamp,
-            );
-            if r != 0 {
-                panic!(
-                    "Failed to enable NIC timestamps (ret {}): {}",
-                    r,
-                    nix::errno::Errno::last()
-                );
-            }
-        }
-        Connection::Datagram(socket)
-    };
-
-    let pin_to: Option<(usize, usize)> = core_id.and_then(|c: u32| {
+    let on_core: Option<(usize, usize)> = config.core_id.and_then(|c: usize| {
         // Get the SMT threads for the Core
         let topo = hwloc::Topology::new();
         let core_depth = topo
@@ -366,7 +236,7 @@ fn parse_args(
 
         for core in all_cores {
             for smt_thread in core.children().iter() {
-                if smt_thread.os_index() == c {
+                if smt_thread.os_index() == c as u32 {
                     return Some((
                         smt_thread.os_index() as usize,
                         smt_thread
@@ -380,34 +250,143 @@ fn parse_args(
         None
     });
 
-    (pin_to, address, connection, suffix, timestamp)
+    let (txa, rxp) = mpsc::channel();
+    let (txp, rxa) = mpsc::channel();
+    let set_rt: bool = config.scheduler == netbench::Scheduler::Fifo;
+
+    let t_app_name = String::from("rserver/app");
+    let t_app = thread::Builder::new()
+        .name(t_app_name)
+        .stack_size(4096 * 10)
+        .spawn(move || loop {
+            on_core.map(|ids: (usize, usize)| {
+                netbench::pin_thread(vec![ids.0]);
+            });
+            if set_rt {
+                netbench::set_rt_fifo();
+            }
+
+            let payload = rxa.recv().expect("Can't receive data on app thread.");
+            txa.send((payload, netbench::now()))
+                .expect("Can't send data to network thread.");
+        })
+        .expect("Can't spawn application thread");
+
+    let t_poll_name = String::from("rserver/polling");
+    let t_poll = thread::Builder::new()
+        .name(t_poll_name)
+        .stack_size(4096 * 10)
+        .spawn(move || {
+            on_core.map(|ids: (usize, usize)| {
+                netbench::pin_thread(vec![ids.1]);
+            });
+            if set_rt {
+                netbench::set_rt_fifo();
+            }
+
+            let channel = Some((txp, rxp));
+            network_loop(&config, address, connection, channel)
+        })
+        .expect("Couldn't spawn a thread");
+
+    (t_app, t_poll)
+}
+
+fn parse_args(matches: &clap::ArgMatches) -> (AppConfig, Connection, net::SocketAddr) {
+    let config = AppConfig::parse(matches);
+    let interface = std::ffi::CString::new(config.interface.clone()).expect("Can't be null");
+
+    let address = unsafe {
+        let interface_addr = netbench::getifaceaddr(interface.as_ptr());
+        match socket::SockAddr::from_libc_sockaddr(&interface_addr) {
+            Some(socket::SockAddr::Inet(s)) => {
+                let mut addr = s.to_std();
+                addr.set_port(config.port);
+                debug!("Found address {} for {}", addr, config.interface);
+                addr
+            }
+            _ => {
+                warn!(
+                    "Could not find address for {:?} using 0.0.0.0",
+                    config.interface
+                );
+                net::SocketAddr::new(net::IpAddr::V4(net::Ipv4Addr::new(0, 0, 0, 0)), config.port)
+            }
+        }
+    };
+
+    let connection = if config.transport == netbench::Transport::Tcp {
+        info!("Waiting for incoming TCP connection");
+        let listener =
+            std::net::TcpListener::bind(&address).expect("Couldn't connect to TCP stream.");
+        let (stream, addr) = listener.accept().expect("Waiting for incoming connection");
+        let stream = mio::net::TcpStream::from_stream(stream).expect("Make mio stream");
+        info!("Incoming connection from {}", addr);
+        unsafe {
+            let r = netbench::enable_packet_timestamps(
+                listener.as_raw_fd(),
+                interface.as_ptr(),
+                config.timestamp,
+            );
+
+            let r = netbench::enable_packet_timestamps(
+                stream.as_raw_fd(),
+                interface.as_ptr(),
+                config.timestamp,
+            );
+            if r != 0 {
+                panic!(
+                    "Failed to enable NIC timestamps (ret {}): {}",
+                    r,
+                    nix::errno::Errno::last()
+                );
+            }
+        }
+        Connection::Stream(stream)
+    } else {
+        debug!("Opening a UDP connection");
+        let socket =
+            mio::net::UdpSocket::bind(&address).expect("Couldn't bind UDP socket to address.");
+        unsafe {
+            let r = netbench::enable_packet_timestamps(
+                socket.as_raw_fd(),
+                interface.as_ptr(),
+                config.timestamp,
+            );
+            if r != 0 {
+                panic!(
+                    "Failed to enable NIC timestamps (ret {}): {}",
+                    r,
+                    nix::errno::Errno::last()
+                );
+            }
+        }
+        Connection::Datagram(socket)
+    };
+
+    (config, connection, address)
 }
 
 fn main() {
     env_logger::init();
     let yaml = load_yaml!("cli.yml");
     let matches = App::from_yaml(yaml).get_matches();
-    let (pin_to, address, connection, suffix, nic_timestamps) = parse_args(&matches);
+    let (config, connection, address) = parse_args(&matches);
 
     println!(
         "Listening on {} with process affinity set to {:?}.",
-        address, pin_to
+        address, config.core_id
     );
 
     if let Some(_) = matches.subcommand_matches("smt") {
-        println!(
-            "Listening on {} with threads spawned on {:?}.",
-            address, pin_to
-        );
-        let (tapp, tpoll) = spawn_listen_pair(address, connection, nic_timestamps, suffix, pin_to);
-
+        let (tapp, tpoll) = spawn_listen_pair(config, address, connection);
         tapp.join().expect("Can't join app-thread.");
         tpoll.join().expect("Can't join poll-thread.")
     } else if let Some(_) = matches.subcommand_matches("single") {
-        pin_to.map(|ids: (usize, usize)| {
-            netbench::pin_thread(vec![ids.0, ids.1]);
-        });
-        let mut channel = None;
-        network_loop(address, connection, suffix, nic_timestamps, channel);
+        config.core_id.map(|c| netbench::pin_thread(vec![c]));
+        if config.scheduler == netbench::Scheduler::Fifo {
+            netbench::set_rt_fifo();
+        }
+        network_loop(&config, address, connection, None);
     }
 }

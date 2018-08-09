@@ -45,7 +45,9 @@ args:
         takes_value: true
         possible_values: [ "none", "rt" ]
     - port:
+        long: port
         help: What port to listen on?
+        takes_value: true
         required: false
 subcommands:
     - smt:

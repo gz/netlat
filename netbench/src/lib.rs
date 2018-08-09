@@ -100,6 +100,7 @@ impl AppConfig {
         let destinations = values_t!(matches, "destinations", String)
             .unwrap_or(vec![String::from("192.168.0.7:3400")]);
         let flood_mode = matches.is_present("flood");
+        let port = value_t!(matches, "port", u16).unwrap_or(3400);
 
         AppConfig {
             interface: iface,
@@ -110,7 +111,7 @@ impl AppConfig {
             timestamp: timestamp,
             transport: transport,
 
-            port: 0,
+            port: port,
 
             requests: requests,
             destinations: destinations,
