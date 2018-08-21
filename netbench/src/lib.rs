@@ -15,7 +15,6 @@ extern crate serde_derive;
 extern crate clap;
 
 use std::os::unix::io::RawFd;
-use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use nix::libc;
@@ -50,7 +49,7 @@ pub enum Scheduler {
 pub struct AppConfig {
     pub interface: String,
     pub output: String,
-    pub core_id: Option<usize>,
+    pub core_ids: Vec<usize>,
 
     pub scheduler: Scheduler,
     pub timestamp: PacketTimestamp,
@@ -69,9 +68,7 @@ impl AppConfig {
     pub fn parse(matches: &clap::ArgMatches) -> AppConfig {
         let iface = String::from(matches.value_of("iface").unwrap_or("enp216s0f1"));
         let output = value_t!(matches, "output", String).unwrap_or(String::from("none"));
-        let core_id: Option<usize> = matches
-            .value_of("pin")
-            .and_then(|c: &str| usize::from_str(c).ok());
+        let core_ids: Vec<usize> = values_t!(matches, "pin", usize).unwrap_or(vec![]);
 
         let timestamp = match matches.value_of("timestamp").unwrap_or("hardware") {
             "hardware" => PacketTimestamp::Hardware,
@@ -105,7 +102,7 @@ impl AppConfig {
         AppConfig {
             interface: iface,
             output: output,
-            core_id: core_id,
+            core_ids: core_ids,
 
             scheduler: scheduler,
             timestamp: timestamp,
@@ -296,7 +293,7 @@ pub fn create_writer(logfile: String, capacity: usize) -> Arc<Mutex<csv::Writer<
 }
 
 #[cfg(target_os = "linux")]
-pub fn pin_thread(core_ids: Vec<usize>) {
+pub fn pin_thread(core_ids: &Vec<usize>) {
     use nix::sched::{sched_setaffinity, CpuSet};
     use nix::unistd::getpid;
 
@@ -310,7 +307,7 @@ pub fn pin_thread(core_ids: Vec<usize>) {
 
 // And this function only gets compiled if the target OS is *not* linux
 #[cfg(not(target_os = "linux"))]
-pub fn pin_thread(_core_id: Vec<usize>) {
+pub fn pin_thread(_core_id: &Vec<usize>) {
     error!("Pinning threads not supported!");
 }
 

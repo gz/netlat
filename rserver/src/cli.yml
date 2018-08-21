@@ -38,6 +38,7 @@ args:
         long: pin
         takes_value: true
         required: false
+        multiple: true
     - scheduler:
         long: scheduler
         help: Run as real time process.

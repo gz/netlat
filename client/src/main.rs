@@ -151,8 +151,7 @@ fn parse_args(matches: &clap::ArgMatches) -> (Vec<(net::SocketAddr, Connection)>
                 }
                 _ => panic!("Got invalid address from iface"),
             };
-        })
-        .collect();
+        }).collect();
 
     (connections, config)
 }
@@ -420,11 +419,8 @@ fn main() {
             let config = config.clone();
 
             handles.push(thread::spawn(move || {
-                config.core_id.map(|id: usize| {
-                    debug!("Pin to core {}.", id);
-                    netbench::pin_thread(vec![id]);
-                });
-
+                debug!("Pin to cores {:?}.", config.core_ids);
+                netbench::pin_thread(&config.core_ids);
                 network_loop(barrier, destination, socket, config)
             }));
         }
@@ -434,10 +430,9 @@ fn main() {
         }
     } else if connections.len() == 1 {
         // Don't spawn a thread, less of a nightmare with perf...
-        config.core_id.map(|id: usize| {
-            debug!("Pin to core {}.", id);
-            netbench::pin_thread(vec![id]);
-        });
+        debug!("Pin to cores {:?}.", config.core_ids);
+        netbench::pin_thread(&config.core_ids);
+
         for (destination, socket) in connections {
             let barrier = barrier.clone();
             let config = config.clone();

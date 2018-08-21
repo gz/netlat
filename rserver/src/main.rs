@@ -6,6 +6,7 @@ extern crate hwloc;
 extern crate log;
 extern crate byteorder;
 extern crate env_logger;
+extern crate libc;
 extern crate mio;
 extern crate netbench;
 extern crate nix;
@@ -225,8 +226,8 @@ fn spawn_listen_pair(
     config: netbench::AppConfig,
     address: net::SocketAddr,
     connection: Connection,
-) -> (thread::JoinHandle<()>, thread::JoinHandle<()>) {
-    let on_core: Option<(usize, usize)> = config.core_id.and_then(|c: usize| {
+) -> Vec<(thread::JoinHandle<()>, thread::JoinHandle<()>)> {
+    let on_core: Vec<(usize, usize)> = config.core_ids.iter().map(|c: &usize| {
         // Get the SMT threads for the Core
         let topo = hwloc::Topology::new();
         let core_depth = topo
@@ -236,32 +237,33 @@ fn spawn_listen_pair(
 
         for core in all_cores {
             for smt_thread in core.children().iter() {
-                if smt_thread.os_index() == c as u32 {
-                    return Some((
+                if smt_thread.os_index() == *c as u32 {
+                    return (
                         smt_thread.os_index() as usize,
                         smt_thread
                             .next_sibling()
                             .expect("CPU doesn't have SMT (check that provided core_id is the min of the pair)?")
                             .os_index() as usize,
-                    ));
+                    );
                 }
             }
         }
-        None
-    });
+        panic!("Invalid core id");
+    }).collect();
 
+    let set_rt: bool = config.scheduler == netbench::Scheduler::Fifo;
+
+    let mut handles = Vec::with_capacity(on_core.len());
+    let pair = on_core[0];
     let (txa, rxp) = mpsc::channel();
     let (txp, rxa) = mpsc::channel();
-    let set_rt: bool = config.scheduler == netbench::Scheduler::Fifo;
 
     let t_app_name = String::from("rserver/app");
     let t_app = thread::Builder::new()
         .name(t_app_name)
         .stack_size(4096 * 10)
         .spawn(move || loop {
-            on_core.map(|ids: (usize, usize)| {
-                netbench::pin_thread(vec![ids.0]);
-            });
+            netbench::pin_thread(&vec![pair.0]);
             if set_rt {
                 netbench::set_rt_fifo();
             }
@@ -269,27 +271,24 @@ fn spawn_listen_pair(
             let payload = rxa.recv().expect("Can't receive data on app thread.");
             txa.send((payload, netbench::now()))
                 .expect("Can't send data to network thread.");
-        })
-        .expect("Can't spawn application thread");
+        }).expect("Can't spawn application thread");
 
     let t_poll_name = String::from("rserver/polling");
     let t_poll = thread::Builder::new()
         .name(t_poll_name)
         .stack_size(4096 * 10)
         .spawn(move || {
-            on_core.map(|ids: (usize, usize)| {
-                netbench::pin_thread(vec![ids.1]);
-            });
+            netbench::pin_thread(&vec![pair.1]);
             if set_rt {
                 netbench::set_rt_fifo();
             }
 
             let channel = Some((txp, rxp));
-            network_loop(&config, address, connection, channel)
-        })
-        .expect("Couldn't spawn a thread");
+            network_loop(&(config.clone()), address, connection, channel)
+        }).expect("Couldn't spawn a thread");
 
-    (t_app, t_poll)
+    handles.push((t_app, t_poll));
+    handles
 }
 
 fn parse_args(matches: &clap::ArgMatches) -> (AppConfig, Connection, net::SocketAddr) {
@@ -345,8 +344,10 @@ fn parse_args(matches: &clap::ArgMatches) -> (AppConfig, Connection, net::Socket
         Connection::Stream(stream)
     } else {
         debug!("Opening a UDP connection");
-        let socket =
-            mio::net::UdpSocket::bind(&address).expect("Couldn't bind UDP socket to address.");
+        let any =
+            net::SocketAddr::new(net::IpAddr::V4(net::Ipv4Addr::new(0, 0, 0, 0)), config.port);
+        let socket = mio::net::UdpSocket::bind(&any).expect("Couldn't bind UDP socket to address.");
+
         unsafe {
             let r = netbench::enable_packet_timestamps(
                 socket.as_raw_fd(),
@@ -375,18 +376,20 @@ fn main() {
 
     println!(
         "Listening on {} with process affinity set to {:?}.",
-        address, config.core_id
+        address, config.core_ids
     );
 
     if let Some(_) = matches.subcommand_matches("smt") {
-        let (tapp, tpoll) = spawn_listen_pair(config, address, connection);
-        tapp.join().expect("Can't join app-thread.");
-        tpoll.join().expect("Can't join poll-thread.")
+        let handles = spawn_listen_pair(config, address, connection);
+        for (tapp, tpoll) in handles {
+            tapp.join().expect("Can't join app-thread.");
+            tpoll.join().expect("Can't join poll-thread.")
+        }
     } else if let Some(_) = matches.subcommand_matches("single") {
-        config.core_id.map(|c| netbench::pin_thread(vec![c]));
+        netbench::pin_thread(&config.core_ids);
         if config.scheduler == netbench::Scheduler::Fifo {
             netbench::set_rt_fifo();
         }
-        network_loop(&config, address, connection, None);
+        network_loop(&config.clone(), address, connection, None);
     }
 }
