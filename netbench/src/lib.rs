@@ -297,12 +297,16 @@ pub fn pin_thread(core_ids: &Vec<usize>) {
     use nix::sched::{sched_setaffinity, CpuSet};
     use nix::unistd::getpid;
 
-    let pid = getpid();
-    let mut affinity_set = CpuSet::new();
-    for core_id in core_ids {
-        affinity_set.set(core_id).expect("Can't set PU in core set");
+    if core_ids.len() > 0 {
+        let pid = getpid();
+        let mut affinity_set = CpuSet::new();
+        for core_id in core_ids {
+            affinity_set
+                .set(*core_id)
+                .expect("Can't set PU in core set");
+        }
+        sched_setaffinity(pid, &affinity_set).expect("Can't pin app thread to core");
     }
-    sched_setaffinity(pid, &affinity_set).expect("Can't pin app thread to core");
 }
 
 // And this function only gets compiled if the target OS is *not* linux
