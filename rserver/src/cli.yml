@@ -33,12 +33,23 @@ args:
         takes_value: true
         required: false
     - pin:
-        help: Pin the client to a particular core.
+        help: Pin the client to a particular set of cores.
         value_name: COREID
         long: pin
         takes_value: true
         required: false
         multiple: true
+    - mapping:
+        help: How threads are mapped to cores.
+        value_name: MAPPING
+        long: mapping
+        takes_value: true
+        possible_values: [ "all", "onetoone" ]
+    - threads:
+        long: threads
+        help: How many threads we should use to process requests.
+        value_name: THREAD_COUNT
+        takes_value: true
     - scheduler:
         long: scheduler
         help: Run as real time process.
@@ -50,8 +61,13 @@ args:
         help: What port to listen on?
         takes_value: true
         required: false
+
 subcommands:
     - smt:
         about: Run epoll and app logic on seperate hyperthreads.
+    - mt:
+        about: Each thread is pinned to one core in round-robin fashion.
     - single:
-        about: Run epoll on a single core.
+        about: Run network look directly in main (for perf).
+    #- mtall:
+    #    about: Thread affinity is set for all given cores.

@@ -10,34 +10,38 @@ extern crate libc;
 extern crate mio;
 extern crate netbench;
 extern crate nix;
+extern crate socket2;
 
 use std::collections::{HashMap, VecDeque};
 use std::net;
-use std::ops::Add;
-use std::os::unix::io::AsRawFd;
+use std::sync::{Arc, Mutex};
+
+use std::os::unix::io::{AsRawFd, RawFd};
+
 use std::sync::mpsc;
 use std::thread;
-
-use netbench::AppConfig;
-use netbench::Connection;
 
 use nix::sys::socket;
 use nix::sys::time;
 use nix::sys::uio;
 
-use mio::unix::UnixReady;
+use socket2::{Domain, Socket, Type};
+
+use mio::unix::{EventedFd, UnixReady};
 use mio::Ready;
 
 use clap::App;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 
+use netbench::*;
+
 const PONG: mio::Token = mio::Token(0);
 
 #[derive(Debug)]
 struct MessageState {
     sender: Option<socket::SockAddr>,
-    log: netbench::LogRecord,
+    log: LogRecord,
 }
 
 impl MessageState {
@@ -48,7 +52,7 @@ impl MessageState {
         rx_nic: u64,
         rx_ht: u64,
     ) -> MessageState {
-        let mut log: netbench::LogRecord = Default::default();
+        let mut log: LogRecord = Default::default();
         log.id = id;
         log.rx_app = rx_app;
         log.rx_nic = rx_nic;
@@ -63,39 +67,26 @@ impl MessageState {
 }
 
 fn network_loop(
-    config: &netbench::AppConfig,
-    address: net::SocketAddr,
+    config: &AppConfig,
     connection: Connection,
     app_channel: Option<(mpsc::Sender<u64>, mpsc::Receiver<(u64, u64)>)>,
+    wtr: Arc<Mutex<csv::Writer<std::fs::File>>>,
 ) {
-    let logfile = format!("latencies-rserver-{}-{}.csv", address.port(), config.output);
-    let wtr = netbench::create_writer(logfile.clone(), 50 * 1024 * 1024);
-
     let poll = mio::Poll::new().expect("Can't create poll.");
 
     let raw_fd: std::os::unix::io::RawFd = match connection {
-        Connection::Datagram(ref socket) => {
-            poll.register(
-                socket,
-                PONG,
-                Ready::writable() | Ready::readable() | UnixReady::error(),
-                mio::PollOpt::level(),
-            ).expect("Can't register send event.");
-            socket.as_raw_fd()
-        }
-        Connection::Stream(ref stream) => {
-            debug!("Register for polled events");
-            poll.register(
-                stream,
-                PONG,
-                Ready::writable() | Ready::readable() | UnixReady::error(),
-                mio::PollOpt::level(),
-            ).expect("Can't register send event.");
-            stream.as_raw_fd()
-        }
+        Connection::Datagram(ref socket) => socket.as_raw_fd(),
+        Connection::Stream(ref stream) => stream.as_raw_fd(),
     };
 
-    let mut events = mio::Events::with_capacity(1024);
+    poll.register(
+        &EventedFd(&raw_fd),
+        PONG,
+        Ready::readable() | UnixReady::error(),
+        mio::PollOpt::edge() | mio::PollOpt::oneshot(),
+    ).expect("Can't register events.");
+
+    let mut events = mio::Events::with_capacity(10);
     let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
     recv_buf.resize(8, 0);
 
@@ -110,122 +101,167 @@ fn network_loop(
     let mut ts_state: HashMap<u64, MessageState> = HashMap::with_capacity(1024);
 
     loop {
-        poll.poll(&mut events, Some(std::time::Duration::from_millis(100)))
-            .expect("Can't poll channel");
+        poll.poll(&mut events, None).expect("Can't poll channel");
         for event in events.iter() {
+            debug!("event = {:?}", event);
+
             if UnixReady::from(event.readiness()).is_error() {
-                let (id, tx_nic) = netbench::retrieve_tx_timestamp(
-                    raw_fd,
-                    &mut time_tx,
-                    config.timestamp,
-                    &connection,
-                );
+                // TODO: do until EAGAIN
+                loop {
+                    let (id, tx_nic) = match retrieve_tx_timestamp(
+                        raw_fd,
+                        &mut time_tx,
+                        config.timestamp,
+                        &connection,
+                    ) {
+                        Ok(data) => data,
+                        Err(nix::Error::Sys(nix::errno::Errno::EAGAIN)) => break,
+                        Err(e) => panic!("Unexpected error during retrieve_tx_timestamp {:?}", e),
+                    };
 
-                debug!("read from err queue id={} tx_nic={}", id, tx_nic);
-                ts_state.remove(&id).map_or_else(
-                    || {
-                        panic!("Packet state for id {} not found?", id);
-                    },
-                    |mut st| {
-                        debug!("Reading timestamp");
-                        assert!(id == st.log.id);
-                        st.log.tx_nic = tx_nic;
-                        st.log.completed = true;
+                    debug!("read from err queue id={} tx_nic={}", id, tx_nic);
+                    ts_state.remove(&id).map_or_else(
+                        || {
+                            panic!("Packet state for id {} not found?", id);
+                        },
+                        |mut st| {
+                            debug!("Reading timestamp");
+                            assert!(id == st.log.id);
+                            st.log.tx_nic = tx_nic;
+                            st.log.completed = true;
 
-                        // Log all the timestamps
-                        let mut logfile = wtr.lock().unwrap();
-                        logfile.serialize(&st.log).expect("Can't write record.");
+                            // Log all the timestamps
+                            let mut logfile = wtr.lock().unwrap();
+                            logfile.serialize(&st.log).expect("Can't write record.");
 
-                        packet_count = packet_count + 1;
-                    },
-                );
+                            packet_count = packet_count + 1;
+                        },
+                    );
+                }
             }
 
             // Receive a packet
             if event.readiness().is_readable() {
                 debug!("Read packet");
                 // Get the packet
-                let msg = socket::recvmsg(
-                    raw_fd,
-                    &[uio::IoVec::from_mut_slice(&mut recv_buf)],
-                    Some(&mut time_rx),
-                    socket::MsgFlags::empty(),
-                ).expect("Can't receive message");
-                if msg.bytes == 0 {
-                    // In TCP 0 means sender shut down the connection, we're done here.
-                    return;
-                }
-                let rx_app = netbench::now();
-                assert_eq!(msg.bytes, 8, "Message payload got {} bytes", msg.bytes);
-                let mut packet_id = recv_buf
-                    .as_slice()
-                    .read_u64::<BigEndian>()
-                    .expect("Can't parse timestamp");
-                debug!("Received packet {} id={}", packet_count, packet_id);
+                loop {
+                    let msg = match socket::recvmsg(
+                        raw_fd,
+                        &[uio::IoVec::from_mut_slice(&mut recv_buf)],
+                        Some(&mut time_rx),
+                        socket::MsgFlags::empty(),
+                    ) {
+                        Ok(msg) => msg,
+                        Err(nix::Error::Sys(nix::errno::Errno::EAGAIN)) => break,
+                        Err(e) => panic!("Unexpected error during socket::recvmsg {:?}", e),
+                    };
 
-                let rx_ht = app_channel.as_ref().map_or(0, |(txp, rxp)| {
-                    txp.send(packet_id)
-                        .expect("Can't forward data to the app thread over channel.");
-                    let (payload, tst) = rxp.recv().expect("Can't receive data");
-                    packet_id = payload;
-                    tst
-                });
-
-                let rx_nic = netbench::read_nic_timestamp(&msg, config.timestamp);
-                debug!("Got rx_nic = {}", rx_nic);
-
-                if packet_id == 0 {
-                    debug!("Client sent 0, flushing logfile.");
-                    let mut logfile = wtr.lock().unwrap();
-
-                    // Log packets that probably didn't make it back
-                    for packet in &send_state {
-                        logfile.serialize(&packet.log).expect("Can't write record.");
+                    if msg.bytes == 0 {
+                        // In TCP 0 means sender shut down the connection, we're done here.
+                        return;
                     }
-                    for (_id, packet) in &ts_state {
-                        logfile.serialize(&packet.log).expect("Can't write record.");
+                    let rx_app = now();
+                    assert_eq!(msg.bytes, 8, "Message payload got {} bytes", msg.bytes);
+                    let mut packet_id = recv_buf
+                        .as_slice()
+                        .read_u64::<BigEndian>()
+                        .expect("Can't parse timestamp");
+                    debug!("Received packet {} id={}", packet_count, packet_id);
+
+                    let rx_ht = app_channel.as_ref().map_or(0, |(txp, rxp)| {
+                        txp.send(packet_id)
+                            .expect("Can't forward data to the app thread over channel.");
+                        let (payload, tst) = rxp.recv().expect("Can't receive data");
+                        packet_id = payload;
+                        tst
+                    });
+
+                    let rx_nic = read_nic_timestamp(&msg, config.timestamp);
+                    debug!("Got rx_nic = {}", rx_nic);
+
+                    if packet_id == 0 {
+                        debug!("Client sent 0, flushing logfile.");
+                        let mut logfile = wtr.lock().unwrap();
+
+                        // Log packets that probably didn't make it back
+                        for packet in &send_state {
+                            logfile.serialize(&packet.log).expect("Can't write record.");
+                        }
+                        for (_id, packet) in &ts_state {
+                            logfile.serialize(&packet.log).expect("Can't write record.");
+                        }
+                        logfile.flush().expect("Can't flush logfile");
+                    } else {
+                        let mst = MessageState::new(packet_id, msg.address, rx_app, rx_nic, rx_ht);
+                        send_state.push_back(mst);
                     }
-                    logfile.flush().expect("Can't flush logfile");
-                } else {
-                    let mst = MessageState::new(packet_id, msg.address, rx_app, rx_nic, rx_ht);
-                    send_state.push_back(mst);
                 }
             }
 
             // Send a packet
-            if event.readiness().is_writable() {
-                send_state.pop_front().map(|mut st| {
-                    st.log.tx_app = netbench::now();
+            // TODO: make sure we try to send the first time we receive something again
+            if send_state.len() > 0 || event.readiness().is_writable() {
+                while send_state.len() > 0 {
+                    let mut st = send_state.pop_front().expect("We need an item");
+                    st.log.tx_app = now();
                     recv_buf.clear();
                     recv_buf
                         .write_u64::<BigEndian>(st.log.id)
                         .expect("Can't serialize payload");
 
                     let bytes_sent = if st.sender.is_some() {
-                        socket::sendto(
+                        match socket::sendto(
                             raw_fd,
                             &recv_buf,
                             &st.sender.unwrap(),
                             socket::MsgFlags::empty(),
-                        ).expect("sendto call for packet failed.")
+                        ) {
+                            Ok(bytes_sent) => bytes_sent,
+                            Err(nix::Error::Sys(nix::errno::Errno::EAGAIN)) => {
+                                send_state.push_front(st);
+                                break;
+                            }
+                            Err(e) => panic!("Unexpected error during socket::sendto {:?}", e),
+                        }
                     } else {
-                        socket::send(raw_fd, &recv_buf, socket::MsgFlags::empty())
-                            .expect("send call for packet failed.")
+                        match socket::send(raw_fd, &recv_buf, socket::MsgFlags::empty()) {
+                            Ok(bytes_sent) => bytes_sent,
+                            Err(nix::Error::Sys(nix::errno::Errno::EAGAIN)) => {
+                                send_state.push_front(st);
+                                break;
+                            }
+                            Err(e) => panic!("Unexpected error during socket::send {:?}", e),
+                        }
                     };
 
                     debug!("sent reply");
                     assert_eq!(bytes_sent, 8);
                     ts_state.insert(st.log.id, st);
-                });
+                }
             }
         }
+
+        // Reregister for events
+        let opts = if send_state.len() == 0 {
+            Ready::readable() | UnixReady::error()
+        } else {
+            debug!("Unable to send everything, register for writable");
+            Ready::writable() | Ready::readable() | UnixReady::error()
+        };
+
+        poll.reregister(
+            &EventedFd(&raw_fd),
+            PONG,
+            opts,
+            mio::PollOpt::edge() | mio::PollOpt::oneshot(),
+        ).expect("Can't re-register events.");
     }
 }
 
-fn spawn_listen_pair(
-    config: netbench::AppConfig,
-    address: net::SocketAddr,
+fn _spawn_listen_pair(
+    config: AppConfig,
     connection: Connection,
+    logger: Arc<Mutex<csv::Writer<std::fs::File>>>,
 ) -> Vec<(thread::JoinHandle<()>, thread::JoinHandle<()>)> {
     let on_core: Vec<(usize, usize)> = config.core_ids.iter().map(|c: &usize| {
         // Get the SMT threads for the Core
@@ -251,7 +287,7 @@ fn spawn_listen_pair(
         panic!("Invalid core id");
     }).collect();
 
-    let set_rt: bool = config.scheduler == netbench::Scheduler::Fifo;
+    let set_rt: bool = config.scheduler == Scheduler::Fifo;
 
     let mut handles = Vec::with_capacity(on_core.len());
     let pair = on_core[0];
@@ -263,13 +299,13 @@ fn spawn_listen_pair(
         .name(t_app_name)
         .stack_size(4096 * 10)
         .spawn(move || loop {
-            netbench::pin_thread(&vec![pair.0]);
+            pin_thread(&vec![pair.0]);
             if set_rt {
-                netbench::set_rt_fifo();
+                set_rt_fifo();
             }
 
             let payload = rxa.recv().expect("Can't receive data on app thread.");
-            txa.send((payload, netbench::now()))
+            txa.send((payload, now()))
                 .expect("Can't send data to network thread.");
         }).expect("Can't spawn application thread");
 
@@ -278,118 +314,194 @@ fn spawn_listen_pair(
         .name(t_poll_name)
         .stack_size(4096 * 10)
         .spawn(move || {
-            netbench::pin_thread(&vec![pair.1]);
+            pin_thread(&vec![pair.1]);
             if set_rt {
-                netbench::set_rt_fifo();
+                set_rt_fifo();
             }
 
             let channel = Some((txp, rxp));
-            network_loop(&(config.clone()), address, connection, channel)
+            network_loop(&(config.clone()), connection, channel, logger)
         }).expect("Couldn't spawn a thread");
 
     handles.push((t_app, t_poll));
     handles
 }
 
-fn parse_args(matches: &clap::ArgMatches) -> (AppConfig, Connection, net::SocketAddr) {
-    let config = AppConfig::parse(matches);
+/// Create a single, TCP or UDP socket
+fn make_socket(config: &AppConfig) -> Socket {
+    let socket = match config.transport {
+        Transport::Tcp => Socket::new(Domain::ipv4(), Type::stream(), None),
+        Transport::Udp => Socket::new(Domain::ipv4(), Type::dgram(), None),
+    }.expect("Can't create socket");
+    if config.threads > 1 {
+        debug!("Set socket reuse_port option");
+        socket.set_reuse_port(true).expect("Can't set reuse port");
+    }
+    socket
+}
+
+fn find_incoming_address(config: &AppConfig) -> net::SocketAddrV4 {
     let interface = std::ffi::CString::new(config.interface.clone()).expect("Can't be null");
 
-    let address = unsafe {
-        let interface_addr = netbench::getifaceaddr(interface.as_ptr());
+    unsafe {
+        let interface_addr = getifaceaddr(interface.as_ptr());
         match socket::SockAddr::from_libc_sockaddr(&interface_addr) {
             Some(socket::SockAddr::Inet(s)) => {
                 let mut addr = s.to_std();
                 addr.set_port(config.port);
                 debug!("Found address {} for {}", addr, config.interface);
-                addr
+                if let net::SocketAddr::V4(ip4addr) = addr {
+                    ip4addr
+                } else {
+                    panic!("Got unknown address");
+                }
             }
             _ => {
                 warn!(
                     "Could not find address for {:?} using 0.0.0.0",
                     config.interface
                 );
-                net::SocketAddr::new(net::IpAddr::V4(net::Ipv4Addr::new(0, 0, 0, 0)), config.port)
+                net::SocketAddrV4::new(net::Ipv4Addr::new(0, 0, 0, 0), config.port)
             }
         }
-    };
+    }
+}
 
-    let connection = if config.transport == netbench::Transport::Tcp {
-        info!("Waiting for incoming TCP connection");
-        let listener =
-            std::net::TcpListener::bind(&address).expect("Couldn't connect to TCP stream.");
-        let (stream, addr) = listener.accept().expect("Waiting for incoming connection");
-        let stream = mio::net::TcpStream::from_stream(stream).expect("Make mio stream");
-        info!("Incoming connection from {}", addr);
-        unsafe {
-            let r = netbench::enable_packet_timestamps(
-                listener.as_raw_fd(),
-                interface.as_ptr(),
-                config.timestamp,
-            );
+fn timestamping_enable(config: &AppConfig, socket: RawFd) {
+    let interface = std::ffi::CString::new(config.interface.clone()).expect("Can't be null");
 
-            let r = netbench::enable_packet_timestamps(
-                stream.as_raw_fd(),
-                interface.as_ptr(),
-                config.timestamp,
+    unsafe {
+        let r = enable_packet_timestamps(socket, interface.as_ptr(), config.timestamp);
+
+        if r != 0 {
+            panic!(
+                "Failed to enable NIC timestamps (ret {}): {}",
+                r,
+                nix::errno::Errno::last()
             );
-            if r != 0 {
-                panic!(
-                    "Failed to enable NIC timestamps (ret {}): {}",
-                    r,
-                    nix::errno::Errno::last()
-                );
+        }
+    }
+}
+
+fn create_connections(config: &AppConfig, address: net::SocketAddrV4) -> Vec<Connection> {
+    let mut connections: Vec<Connection> = Vec::with_capacity(config.threads);
+
+    match config.transport {
+        Transport::Tcp => {
+            let socket = make_socket(config);
+            socket.bind(&address.into()).expect("Can't bind to address");
+            let listener = socket.into_tcp_listener();
+
+            for _thread_id in 0..config.threads {
+                let (stream, addr) = listener.accept().expect("Waiting for incoming connection");
+                let stream = mio::net::TcpStream::from_stream(stream).expect("Make mio stream");
+                info!("Incoming connection from {}", addr);
+                timestamping_enable(config, stream.as_raw_fd());
+                connections.push(Connection::Stream(stream));
             }
         }
-        Connection::Stream(stream)
-    } else {
-        debug!("Opening a UDP connection");
-        let any =
-            net::SocketAddr::new(net::IpAddr::V4(net::Ipv4Addr::new(0, 0, 0, 0)), config.port);
-        let socket = mio::net::UdpSocket::bind(&any).expect("Couldn't bind UDP socket to address.");
+        Transport::Udp => {
+            let mut sockets = Vec::with_capacity(config.threads);
+            // With SO_REUSEPORT we need to set the option before we bind,
+            // in the match statement below
+            for _thread in 0..config.threads {
+                sockets.push(make_socket(config));
+            }
 
-        unsafe {
-            let r = netbench::enable_packet_timestamps(
-                socket.as_raw_fd(),
-                interface.as_ptr(),
-                config.timestamp,
-            );
-            if r != 0 {
-                panic!(
-                    "Failed to enable NIC timestamps (ret {}): {}",
-                    r,
-                    nix::errno::Errno::last()
-                );
+            for socket in sockets {
+                socket.bind(&address.into()).expect("Can't bind to address");
+                timestamping_enable(config, socket.as_raw_fd());
+
+                connections.push(Connection::Datagram(
+                    mio::net::UdpSocket::from_socket(socket.into_udp_socket())
+                        .expect("Couldn't make mio UDP socket from socket."),
+                ));
             }
         }
-        Connection::Datagram(socket)
-    };
+    }
 
-    (config, connection, address)
+    connections
+}
+
+fn parse_args(matches: &clap::ArgMatches) -> (AppConfig, net::SocketAddrV4) {
+    let config = AppConfig::parse(matches);
+    let address = find_incoming_address(&config);
+    (config, address)
+}
+
+fn set_thread_affinity(config: &AppConfig, thread_id: usize) {
+    match config.mapping {
+        ThreadMapping::All => {
+            debug!(
+                "Set affinity for thread {} to cpu {:?}",
+                thread_id, config.core_ids
+            );
+            pin_thread(&config.core_ids);
+        }
+        ThreadMapping::OneToOne => {
+            let core = config.core_ids[thread_id % config.core_ids.len()];
+            debug!("Set affinity for thread {} to cpu {:?}", thread_id, core);
+            pin_thread(&vec![core]);
+        }
+    }
+}
+
+fn set_scheduling(config: &AppConfig) {
+    match config.scheduler {
+        Scheduler::Fifo => set_rt_fifo(),
+        Scheduler::None => debug!("Default scheduling"),
+    }
 }
 
 fn main() {
     env_logger::init();
     let yaml = load_yaml!("cli.yml");
     let matches = App::from_yaml(yaml).get_matches();
-    let (config, connection, address) = parse_args(&matches);
+    let (config, address) = parse_args(&matches);
 
     println!(
         "Listening on {} with process affinity set to {:?}.",
         address, config.core_ids
     );
 
-    if let Some(_) = matches.subcommand_matches("smt") {
-        let handles = spawn_listen_pair(config, address, connection);
+    /*if let Some(_) = matches.subcommand_matches("smt") {
+        let handles = spawn_listen_pair(config, connection, logger);
         for (tapp, tpoll) in handles {
             tapp.join().expect("Can't join app-thread.");
             tpoll.join().expect("Can't join poll-thread.")
         }
-    } else if let Some(_) = matches.subcommand_matches("single") {
-        netbench::pin_thread(&config.core_ids);
-        if config.scheduler == netbench::Scheduler::Fifo {
-            netbench::set_rt_fifo();
+    } */
+
+    let mut threads = Vec::with_capacity(config.threads);
+    let connections = create_connections(&config, address);
+    let logfile = format!("latencies-rserver-{}-{}.csv", address.port(), config.output);
+    let logger = create_writer(logfile.clone(), LOGFILE_SIZE);
+
+    if let Some(_) = matches.subcommand_matches("mt") {
+        for (idx, connection) in connections.into_iter().enumerate() {
+            let config = config.clone();
+            let logger = logger.clone();
+            let t = thread::Builder::new()
+                .name(format!("rserver-{}", idx))
+                .stack_size(1024 * 1024 * 2)
+                .spawn(move || {
+                    set_thread_affinity(&config, idx);
+                    set_scheduling(&config);
+                    network_loop(&config, connection, None, logger);
+                }).expect("Couldn't spawn a thread");
+            threads.push(t);
         }
-        network_loop(&config.clone(), address, connection, None);
+        for thread in threads.into_iter() {
+            thread.join().expect("Can't wait for thread?");
+        }
+    } else if let Some(_) = matches.subcommand_matches("single") {
+        assert!(config.threads == 1);
+        set_thread_affinity(&config, 0);
+        set_scheduling(&config);
+        let connection = create_connections(&config, address)
+            .into_iter()
+            .next()
+            .unwrap();
+        network_loop(&config, connection, None, logger);
     }
 }

@@ -21,6 +21,8 @@ use nix::libc;
 use nix::sys::socket;
 use nix::sys::time;
 
+pub const LOGFILE_SIZE: usize = 256 * 1024 * 1024;
+
 pub enum Connection {
     Datagram(mio::net::UdpSocket),
     Stream(mio::net::TcpStream),
@@ -45,11 +47,21 @@ pub enum Scheduler {
     Fifo,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize)]
+pub enum ThreadMapping {
+    /// Affinity for each thread to run on all provided CPUs
+    All,
+    /// Assign threads invididually to CPUs in round-robin fashion
+    OneToOne,
+}
+
 #[derive(Clone)]
 pub struct AppConfig {
     pub interface: String,
     pub output: String,
     pub core_ids: Vec<usize>,
+    pub threads: usize,
+    pub mapping: ThreadMapping,
 
     pub scheduler: Scheduler,
     pub timestamp: PacketTimestamp,
@@ -69,6 +81,15 @@ impl AppConfig {
         let iface = String::from(matches.value_of("iface").unwrap_or("enp216s0f1"));
         let output = value_t!(matches, "output", String).unwrap_or(String::from("none"));
         let core_ids: Vec<usize> = values_t!(matches, "pin", usize).unwrap_or(vec![]);
+        let threads = value_t!(matches, "threads", usize).unwrap_or(1);
+
+        let mapping = match matches.value_of("mapping").unwrap_or("all") {
+            "all" => ThreadMapping::All,
+            "onetoone" => ThreadMapping::OneToOne,
+            _ => unreachable!(
+                "Invalid CLI argument, may be clap bug if possible_values doesn't work?"
+            ),
+        };
 
         let timestamp = match matches.value_of("timestamp").unwrap_or("hardware") {
             "hardware" => PacketTimestamp::Hardware,
@@ -78,6 +99,7 @@ impl AppConfig {
                 "Invalid CLI argument, may be clap bug if possible_values doesn't work?"
             ),
         };
+
         let scheduler = match matches.value_of("scheduler").unwrap_or("none") {
             "rt" => Scheduler::Fifo,
             "none" => Scheduler::None,
@@ -85,6 +107,7 @@ impl AppConfig {
                 "Invalid CLI argument, may be clap bug if possible_values doesn't work?"
             ),
         };
+
         let transport = match matches.value_of("transport").unwrap_or("udp") {
             "udp" => Transport::Udp,
             "tcp" => Transport::Tcp,
@@ -103,6 +126,8 @@ impl AppConfig {
             interface: iface,
             output: output,
             core_ids: core_ids,
+            threads: threads,
+            mapping: mapping,
 
             scheduler: scheduler,
             timestamp: timestamp,
@@ -177,11 +202,11 @@ pub fn retrieve_tx_timestamp(
     cmsg_space: &mut socket::CmsgSpace<[time::TimeVal; 3]>,
     method: PacketTimestamp,
     connection: &Connection,
-) -> (u64, u64) {
+) -> nix::Result<(u64, u64)> {
     use byteorder::{BigEndian, ReadBytesExt};
     use nix::sys::uio;
 
-    // XXX: find a better way to do this
+    // TODO: find a better way to do this
     // 14-byte Ethernet header
     // 20-byte IP header
     // 8-byte UDP header
@@ -192,23 +217,25 @@ pub fn retrieve_tx_timestamp(
         Connection::Datagram(_) => PACKET_HEADERS_UDP + 8,
         Connection::Stream(_) => PACKET_HEADERS_TCP + 8,
     };
-    // Ugly allocation here due to not knowing tcp/udp at compile time:
+
+    // TODO: Ugly allocation here due to not knowing tcp/udp at compile time:
     let mut recv_buf: Vec<u8> = Vec::with_capacity(pkt_size);
     recv_buf.resize(pkt_size, 0);
 
-    let msg = socket::recvmsg(
+    let msg = try!(socket::recvmsg(
         sock,
         &[uio::IoVec::from_mut_slice(&mut recv_buf)],
         Some(cmsg_space),
         socket::MsgFlags::MSG_ERRQUEUE,
-    ).expect("Can't receive on error queue");
+    ));
 
     debug!("msg = {:?}", msg.bytes);
     let payload_id = recv_buf[pkt_size - 8..]
         .as_ref()
         .read_u64::<BigEndian>()
         .expect("Can't read ID?");
-    (payload_id, read_nic_timestamp(&msg, method))
+
+    Ok((payload_id, read_nic_timestamp(&msg, method)))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -217,9 +244,9 @@ pub fn retrieve_tx_timestamp(
     _cmsg_space: &mut socket::CmsgSpace<[time::TimeVal; 3]>,
     _method: PacketTimestamp,
     _connection: &Connection,
-) -> (u64, u64) {
+) -> nix::Result<(u64, u64)> {
     debug!("Can't retrieve timestamp on the current platform.");
-    (0, 0)
+    Ok((0, 0))
 }
 
 /// Return the corresponding NIC timestamp (HW or SW) of a given message in ns.
@@ -295,17 +322,18 @@ pub fn create_writer(logfile: String, capacity: usize) -> Arc<Mutex<csv::Writer<
 #[cfg(target_os = "linux")]
 pub fn pin_thread(core_ids: &Vec<usize>) {
     use nix::sched::{sched_setaffinity, CpuSet};
-    use nix::unistd::getpid;
 
     if core_ids.len() > 0 {
-        let pid = getpid();
         let mut affinity_set = CpuSet::new();
         for core_id in core_ids {
             affinity_set
                 .set(*core_id)
                 .expect("Can't set PU in core set");
         }
-        sched_setaffinity(pid, &affinity_set).expect("Can't pin app thread to core");
+
+        // pid 0 pins to the current thread
+        sched_setaffinity(nix::unistd::Pid::from_raw(0i32), &affinity_set)
+            .expect("Can't pin app thread to core");
     }
 }
 

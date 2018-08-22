@@ -33,12 +33,18 @@ args:
         takes_value: true
         required: false
     - pin:
-        help: Pin the client to a particular core.
+        help: Pin the client to a particular set of cores.
         value_name: COREID
         long: pin
         takes_value: true
         required: false
         multiple: true
+    - mapping:
+        help: How threads are mapped to cores.
+        value_name: MAPPING
+        long: mapping
+        takes_value: true
+        possible_values: [ "all", "onetoone" ]
     - scheduler:
         long: scheduler
         help: Run as real time process.
@@ -54,7 +60,7 @@ args:
         long: flood
         required: false
     - destinations:
-        help: Send to these addr:port pairs.
+        help: Send to these addr:port pairs (one thread is created for every specified pair).
         multiple: true
         takes_value: true
         required: false

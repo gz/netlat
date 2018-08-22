@@ -16,20 +16,21 @@
 
 ## Running the rserver
 
-Run a server on interface `enp216s0f1` port 3400, with hardware timestamps, store results in `latencies-rserver-3400-test.csv`:
 
 ```
-cd rserver; cargo run --release -- --iface enp216s0f1 -t hardware -s test 3400 single
+cd rserver
+
+RUST_LOG='rserver=debug' cargo run -- --iface enp216s0f1 --mapping all --output test --pin 14 15 16 17 18 19 20 21 22 23 24 25 26 27 --port 3400 --scheduler none --threads 4 --timestamp hardware --transport udp mt
 ```
 
 Use `cargo run --release -- --help` for more information.
 
 ## Running the netlat client
 
-Send 100000 requests to the server listening on `192.168.1.40:3400` over our local interface `enp216s0f1`, store result in `latencies-client-3400-test.csv`:
-
 ```
-cd client; cargo run --release -- --iface enp216s0f1 -t hardware -r 100000 -p 192.168.1.40:3400 -s test
+cd client;
+
+RUST_LOG='netlat=debug' cargo run -- --iface enp216s0f1 --output test --pin 14 15 16 17 18 19 20 21 22 23 24 25 26 27 --scheduler none --timestamp hardware --transport udp 100 192.168.0.34:3400
 ```
 
 Use `cargo run --release -- --help` for more information.
