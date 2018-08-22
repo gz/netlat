@@ -21,18 +21,14 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::mpsc;
 use std::thread;
 
+use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use clap::App;
+use mio::unix::{EventedFd, UnixReady};
+use mio::Ready;
 use nix::sys::socket;
 use nix::sys::time;
 use nix::sys::uio;
-
 use socket2::{Domain, Socket, Type};
-
-use mio::unix::{EventedFd, UnixReady};
-use mio::Ready;
-
-use clap::App;
-
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 
 use netbench::*;
 
@@ -299,9 +295,9 @@ fn _spawn_listen_pair(
         .name(t_app_name)
         .stack_size(4096 * 10)
         .spawn(move || loop {
-            pin_thread(&vec![pair.0]);
+            //pin_thread(&vec![pair.0]);
             if set_rt {
-                set_rt_fifo();
+                //set_rt_fifo();
             }
 
             let payload = rxa.recv().expect("Can't receive data on app thread.");
@@ -314,9 +310,9 @@ fn _spawn_listen_pair(
         .name(t_poll_name)
         .stack_size(4096 * 10)
         .spawn(move || {
-            pin_thread(&vec![pair.1]);
+            //pin_thread(&vec![pair.1]);
             if set_rt {
-                set_rt_fifo();
+                //set_rt_fifo();
             }
 
             let channel = Some((txp, rxp));
@@ -325,62 +321,6 @@ fn _spawn_listen_pair(
 
     handles.push((t_app, t_poll));
     handles
-}
-
-/// Create a single, TCP or UDP socket
-fn make_socket(config: &AppConfig) -> Socket {
-    let socket = match config.transport {
-        Transport::Tcp => Socket::new(Domain::ipv4(), Type::stream(), None),
-        Transport::Udp => Socket::new(Domain::ipv4(), Type::dgram(), None),
-    }.expect("Can't create socket");
-    if config.threads > 1 {
-        debug!("Set socket reuse_port option");
-        socket.set_reuse_port(true).expect("Can't set reuse port");
-    }
-    socket
-}
-
-fn find_incoming_address(config: &AppConfig) -> net::SocketAddrV4 {
-    let interface = std::ffi::CString::new(config.interface.clone()).expect("Can't be null");
-
-    unsafe {
-        let interface_addr = getifaceaddr(interface.as_ptr());
-        match socket::SockAddr::from_libc_sockaddr(&interface_addr) {
-            Some(socket::SockAddr::Inet(s)) => {
-                let mut addr = s.to_std();
-                addr.set_port(config.port);
-                debug!("Found address {} for {}", addr, config.interface);
-                if let net::SocketAddr::V4(ip4addr) = addr {
-                    ip4addr
-                } else {
-                    panic!("Got unknown address");
-                }
-            }
-            _ => {
-                warn!(
-                    "Could not find address for {:?} using 0.0.0.0",
-                    config.interface
-                );
-                net::SocketAddrV4::new(net::Ipv4Addr::new(0, 0, 0, 0), config.port)
-            }
-        }
-    }
-}
-
-fn timestamping_enable(config: &AppConfig, socket: RawFd) {
-    let interface = std::ffi::CString::new(config.interface.clone()).expect("Can't be null");
-
-    unsafe {
-        let r = enable_packet_timestamps(socket, interface.as_ptr(), config.timestamp);
-
-        if r != 0 {
-            panic!(
-                "Failed to enable NIC timestamps (ret {}): {}",
-                r,
-                nix::errno::Errno::last()
-            );
-        }
-    }
 }
 
 fn create_connections(config: &AppConfig, address: net::SocketAddrV4) -> Vec<Connection> {
@@ -423,36 +363,6 @@ fn create_connections(config: &AppConfig, address: net::SocketAddrV4) -> Vec<Con
     connections
 }
 
-fn parse_args(matches: &clap::ArgMatches) -> (AppConfig, net::SocketAddrV4) {
-    let config = AppConfig::parse(matches);
-    let address = find_incoming_address(&config);
-    (config, address)
-}
-
-fn set_thread_affinity(config: &AppConfig, thread_id: usize) {
-    match config.mapping {
-        ThreadMapping::All => {
-            debug!(
-                "Set affinity for thread {} to cpu {:?}",
-                thread_id, config.core_ids
-            );
-            pin_thread(&config.core_ids);
-        }
-        ThreadMapping::OneToOne => {
-            let core = config.core_ids[thread_id % config.core_ids.len()];
-            debug!("Set affinity for thread {} to cpu {:?}", thread_id, core);
-            pin_thread(&vec![core]);
-        }
-    }
-}
-
-fn set_scheduling(config: &AppConfig) {
-    match config.scheduler {
-        Scheduler::Fifo => set_rt_fifo(),
-        Scheduler::None => debug!("Default scheduling"),
-    }
-}
-
 fn main() {
     env_logger::init();
     let yaml = load_yaml!("cli.yml");
@@ -474,7 +384,7 @@ fn main() {
 
     let mut threads = Vec::with_capacity(config.threads);
     let connections = create_connections(&config, address);
-    let logfile = format!("latencies-rserver-{}-{}.csv", address.port(), config.output);
+    let logfile = format!("latencies-rserver-{}.csv", config.output);
     let logger = create_writer(logfile.clone(), LOGFILE_SIZE);
 
     if let Some(_) = matches.subcommand_matches("mt") {

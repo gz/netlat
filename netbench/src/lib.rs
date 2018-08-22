@@ -7,6 +7,7 @@ extern crate csv;
 extern crate ctrlc;
 extern crate mio;
 extern crate prctl;
+extern crate socket2;
 
 #[macro_use]
 extern crate serde_derive;
@@ -14,15 +15,18 @@ extern crate serde_derive;
 #[macro_use]
 extern crate clap;
 
+use std::net;
 use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex};
 
 use nix::libc;
 use nix::sys::socket;
 use nix::sys::time;
+use socket2::{Domain, Socket, Type};
 
 pub const LOGFILE_SIZE: usize = 256 * 1024 * 1024;
 
+#[derive(Debug)]
 pub enum Connection {
     Datagram(mio::net::UdpSocket),
     Stream(mio::net::TcpStream),
@@ -149,7 +153,7 @@ extern "C" {
     fn enable_hwtstamp(sock: i32, interface: *const libc::c_char, hw: bool) -> i32;
 }
 
-pub unsafe fn enable_packet_timestamps(
+unsafe fn enable_packet_timestamps(
     sock: i32,
     interface: *const libc::c_char,
     method: PacketTimestamp,
@@ -320,7 +324,7 @@ pub fn create_writer(logfile: String, capacity: usize) -> Arc<Mutex<csv::Writer<
 }
 
 #[cfg(target_os = "linux")]
-pub fn pin_thread(core_ids: &Vec<usize>) {
+fn pin_thread(core_ids: &Vec<usize>) {
     use nix::sched::{sched_setaffinity, CpuSet};
 
     if core_ids.len() > 0 {
@@ -339,12 +343,12 @@ pub fn pin_thread(core_ids: &Vec<usize>) {
 
 // And this function only gets compiled if the target OS is *not* linux
 #[cfg(not(target_os = "linux"))]
-pub fn pin_thread(_core_id: &Vec<usize>) {
+fn pin_thread(_core_id: &Vec<usize>) {
     error!("Pinning threads not supported!");
 }
 
 #[cfg(target_os = "linux")]
-pub fn set_rt_fifo() {
+fn set_rt_fifo() {
     unsafe {
         let params = libc::sched_param {
             sched_priority: 1i32,
@@ -357,7 +361,7 @@ pub fn set_rt_fifo() {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn set_rt_fifo() {
+fn set_rt_fifo() {
     error!("set_rt_fifo is not supported in the current platform!");
 }
 
@@ -369,4 +373,90 @@ pub fn set_process_name(name: &str) {
 #[cfg(not(target_os = "linux"))]
 pub fn set_process_name(name: &str) {
     error!("set_process_name is not supported on the current platform!");
+}
+
+pub fn set_thread_affinity(config: &AppConfig, thread_id: usize) {
+    match config.mapping {
+        ThreadMapping::All => {
+            debug!(
+                "Set affinity for thread {} to cpu {:?}",
+                thread_id, config.core_ids
+            );
+            pin_thread(&config.core_ids);
+        }
+        ThreadMapping::OneToOne => {
+            let core = config.core_ids[thread_id % config.core_ids.len()];
+            debug!("Set affinity for thread {} to cpu {:?}", thread_id, core);
+            pin_thread(&vec![core]);
+        }
+    }
+}
+
+pub fn set_scheduling(config: &AppConfig) {
+    match config.scheduler {
+        Scheduler::Fifo => set_rt_fifo(),
+        Scheduler::None => debug!("Default scheduling"),
+    }
+}
+
+fn find_my_interface_address(config: &AppConfig) -> net::SocketAddrV4 {
+    let interface = std::ffi::CString::new(config.interface.clone()).expect("Can't be null");
+
+    unsafe {
+        let interface_addr = getifaceaddr(interface.as_ptr());
+        match socket::SockAddr::from_libc_sockaddr(&interface_addr) {
+            Some(socket::SockAddr::Inet(s)) => {
+                let mut addr = s.to_std();
+                addr.set_port(config.port);
+                debug!("Found address {} for {}", addr, config.interface);
+                if let net::SocketAddr::V4(ip4addr) = addr {
+                    ip4addr
+                } else {
+                    panic!("Got unknown address");
+                }
+            }
+            _ => {
+                warn!(
+                    "Could not find address for {:?} using 0.0.0.0",
+                    config.interface
+                );
+                net::SocketAddrV4::new(net::Ipv4Addr::new(0, 0, 0, 0), config.port)
+            }
+        }
+    }
+}
+
+pub fn parse_args(matches: &clap::ArgMatches) -> (AppConfig, net::SocketAddrV4) {
+    let config = AppConfig::parse(matches);
+    let address = find_my_interface_address(&config);
+    (config, address)
+}
+
+/// Create a single, TCP or UDP socket
+pub fn make_socket(config: &AppConfig) -> Socket {
+    let socket = match config.transport {
+        Transport::Tcp => Socket::new(Domain::ipv4(), Type::stream(), None),
+        Transport::Udp => Socket::new(Domain::ipv4(), Type::dgram(), None),
+    }.expect("Can't create socket");
+    if config.threads > 1 {
+        debug!("Set socket reuse_port option");
+        socket.set_reuse_port(true).expect("Can't set reuse port");
+    }
+    socket
+}
+
+pub fn timestamping_enable(config: &AppConfig, socket: RawFd) {
+    let interface = std::ffi::CString::new(config.interface.clone()).expect("Can't be null");
+
+    unsafe {
+        let r = enable_packet_timestamps(socket, interface.as_ptr(), config.timestamp);
+
+        if r != 0 {
+            panic!(
+                "Failed to enable NIC timestamps (ret {}): {}",
+                r,
+                nix::errno::Errno::last()
+            );
+        }
+    }
 }

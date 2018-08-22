@@ -20,7 +20,11 @@
 ```
 cd rserver
 
-RUST_LOG='rserver=debug' cargo run -- --iface enp216s0f1 --mapping all --output test --pin 14 15 16 17 18 19 20 21 22 23 24 25 26 27 --port 3400 --scheduler none --threads 4 --timestamp hardware --transport udp mt
+# Debug
+RUST_BACKTRACE=1 RUST_LOG='netbench=debug,rserver=debug' cargo run -- --iface enp216s0f1 --mapping all --output test --pin 14 15 16 17 18 19 20 21 22 23 24 25 26 27 --port 3400 --scheduler none --threads 4 --timestamp hardware --transport udp mt
+
+# No debug
+cargo run --release -- --iface enp216s0f1 --mapping all --output test --pin 14 15 16 17 18 19 20 21 22 23 24 25 26 27 --port 3400 --scheduler none --threads 4 --timestamp hardware --transport udp mt
 ```
 
 Use `cargo run --release -- --help` for more information.

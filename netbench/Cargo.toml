@@ -5,6 +5,7 @@ authors = ["Gerd Zellweger <mail@gerdzellweger.com>"]
 build = "build.rs"
 
 [dependencies]
+socket2 = { version = "0.3.7", features = ["reuseport"] }
 nix = { git = "https://github.com/gz/nix.git" }
 log = { version = "0.4" }
 serde_derive = "*"
