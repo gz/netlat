@@ -202,6 +202,8 @@ fn network_loop(
                         .write_u64::<BigEndian>(st.log.id)
                         .expect("Can't serialize payload");
 
+                    let mut ts_state = ts_state.lock().unwrap();
+
                     let bytes_sent = if st.sender.is_some() {
                         match socket::sendto(
                             raw_fd,
@@ -231,7 +233,6 @@ fn network_loop(
 
                     debug!("Sent reply for id={}", st.log.id);
                     assert_eq!(bytes_sent, 8);
-                    let mut ts_state = ts_state.lock().unwrap();
                     ts_state.insert(st.log.id, st);
                 }
             }

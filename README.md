@@ -23,8 +23,14 @@ cd rserver
 # Debug
 RUST_BACKTRACE=1 RUST_LOG='netbench=debug,rserver=debug' cargo run -- --iface enp216s0f1 --mapping all --output test --pin 14 15 16 17 18 19 20 21 22 23 24 25 26 27 --port 3400 --scheduler none --threads 4 --timestamp hardware --transport udp mt
 
+
+
 # No debug
-cargo run --release -- --iface enp216s0f1 --mapping all --output test --pin 14 15 16 17 18 19 20 21 22 23 24 25 26 27 --port 3400 --scheduler none --threads 4 --timestamp hardware --transport udp mt
+
+
+
+RUST_LOG='rserver=info' cargo run --release -- --iface enp216s0f1 --mapping onetoone --output test --pin 14 15 16 17 18 19 20 21 22 23 24 25 26 27 --port 3400 --scheduler none --threads 10 --timestamp hardware --transport udp --sockets 1 --socketmapping all mt 
+
 ```
 
 Use `cargo run --release -- --help` for more information.
@@ -35,6 +41,9 @@ Use `cargo run --release -- --help` for more information.
 cd client;
 
 RUST_LOG='netlat=debug' cargo run -- --iface enp216s0f1 --output test --pin 14 15 16 17 18 19 20 21 22 23 24 25 26 27 --scheduler none --timestamp hardware --transport udp 10 192.168.0.34:3400 192.168.0.34:3400 192.168.0.34:3400
+
+cargo run --release -- --iface enp216s0f1 --output test --pin 14 15 16 17 18 19 20 21 22 23 24 25 26 27 --scheduler none --timestamp hardware --transport udp 100000000 192.168.0.34:3400 192.168.0.34:3400 192.168.0.34:3400
+
 ```
 
 Use `cargo run --release -- --help` for more information.
