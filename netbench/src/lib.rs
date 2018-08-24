@@ -131,9 +131,9 @@ impl AppConfig {
             ),
         };
 
-        let scheduler = match matches.value_of("scheduler").unwrap_or("none") {
+        let scheduler = match matches.value_of("scheduler").unwrap_or("default") {
             "rt" => Scheduler::Fifo,
-            "none" => Scheduler::Default,
+            "default" => Scheduler::Default,
             _ => unreachable!(
                 "Invalid CLI argument, may be clap bug if possible_values doesn't work?"
             ),

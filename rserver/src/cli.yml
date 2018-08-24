@@ -55,7 +55,7 @@ args:
         help: Run as real time process.
         value_name: CLASS
         takes_value: true
-        possible_values: [ "none", "rt" ]
+        possible_values: [ "default", "rt" ]
     - port:
         long: port
         help: What port to listen on?

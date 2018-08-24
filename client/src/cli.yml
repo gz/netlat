@@ -50,7 +50,7 @@ args:
         help: Run as real time process.
         value_name: CLASS
         takes_value: true
-        possible_values: [ "none", "rt" ]
+        possible_values: [ "default", "rt" ]
     - requests:
         help: How many requests to send.
         takes_value: true
