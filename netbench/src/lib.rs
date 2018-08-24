@@ -16,6 +16,7 @@ extern crate serde_derive;
 extern crate clap;
 
 use std::net;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex};
 
@@ -28,8 +29,17 @@ pub const LOGFILE_SIZE: usize = 256 * 1024 * 1024;
 
 #[derive(Debug)]
 pub enum Connection {
-    Datagram(mio::net::UdpSocket),
-    Stream(mio::net::TcpStream),
+    Datagram(net::UdpSocket),
+    Stream(net::TcpStream),
+}
+
+impl AsRawFd for Connection {
+    fn as_raw_fd(&self) -> RawFd {
+        match self {
+            Connection::Datagram(s) => s.as_raw_fd(),
+            Connection::Stream(s) => s.as_raw_fd(),
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize)]
@@ -59,13 +69,21 @@ pub enum ThreadMapping {
     OneToOne,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize)]
+pub enum SocketMapping {
+    All,
+    OneToOne,
+}
+
+#[derive(Debug, Clone)]
 pub struct AppConfig {
     pub interface: String,
     pub output: String,
     pub core_ids: Vec<usize>,
     pub threads: usize,
+    pub sockets: usize,
     pub mapping: ThreadMapping,
+    pub socketmapping: SocketMapping,
 
     pub scheduler: Scheduler,
     pub timestamp: PacketTimestamp,
@@ -75,7 +93,7 @@ pub struct AppConfig {
     pub port: u16,
 
     // Client
-    pub requests: u64,
+    pub requests: usize,
     pub destinations: Vec<String>,
     pub flood: bool,
 }
@@ -86,6 +104,15 @@ impl AppConfig {
         let output = value_t!(matches, "output", String).unwrap_or(String::from("none"));
         let core_ids: Vec<usize> = values_t!(matches, "pin", usize).unwrap_or(vec![]);
         let threads = value_t!(matches, "threads", usize).unwrap_or(1);
+        let sockets = value_t!(matches, "sockets", usize).unwrap_or(1);
+
+        let socketmapping = match matches.value_of("socketmapping").unwrap_or("onetoone") {
+            "all" => SocketMapping::All,
+            "onetoone" => SocketMapping::OneToOne,
+            _ => unreachable!(
+                "Invalid CLI argument, may be clap bug if possible_values doesn't work?"
+            ),
+        };
 
         let mapping = match matches.value_of("mapping").unwrap_or("all") {
             "all" => ThreadMapping::All,
@@ -120,7 +147,7 @@ impl AppConfig {
             ),
         };
 
-        let requests = value_t!(matches, "requests", u64).unwrap_or(250000);
+        let requests = value_t!(matches, "requests", usize).unwrap_or(250000);
         let destinations = values_t!(matches, "destinations", String)
             .unwrap_or(vec![String::from("192.168.0.7:3400")]);
         let flood_mode = matches.is_present("flood");
@@ -132,6 +159,8 @@ impl AppConfig {
             core_ids: core_ids,
             threads: threads,
             mapping: mapping,
+            sockets: sockets,
+            socketmapping: socketmapping,
 
             scheduler: scheduler,
             timestamp: timestamp,
@@ -204,8 +233,7 @@ pub fn rstimespec_to_ns(ts: nix::sys::time::TimeSpec) -> u64 {
 pub fn retrieve_tx_timestamp(
     sock: RawFd,
     cmsg_space: &mut socket::CmsgSpace<[time::TimeVal; 3]>,
-    method: PacketTimestamp,
-    connection: &Connection,
+    config: &AppConfig,
 ) -> nix::Result<(u64, u64)> {
     use byteorder::{BigEndian, ReadBytesExt};
     use nix::sys::uio;
@@ -217,9 +245,9 @@ pub fn retrieve_tx_timestamp(
     const PACKET_HEADERS_UDP: usize = 14 + 20 + 8;
     // or 32-byte TCP header
     const PACKET_HEADERS_TCP: usize = 66;
-    let pkt_size = match connection {
-        Connection::Datagram(_) => PACKET_HEADERS_UDP + 8,
-        Connection::Stream(_) => PACKET_HEADERS_TCP + 8,
+    let pkt_size = match config.transport {
+        Transport::Udp => PACKET_HEADERS_UDP + 8,
+        Transport::Tcp => PACKET_HEADERS_TCP + 8,
     };
 
     // TODO: Ugly allocation here due to not knowing tcp/udp at compile time:
@@ -239,15 +267,14 @@ pub fn retrieve_tx_timestamp(
         .read_u64::<BigEndian>()
         .expect("Can't read ID?");
 
-    Ok((payload_id, read_nic_timestamp(&msg, method)))
+    Ok((payload_id, read_nic_timestamp(&msg, config.timestamp)))
 }
 
 #[cfg(not(target_os = "linux"))]
 pub fn retrieve_tx_timestamp(
     _sock: RawFd,
     _cmsg_space: &mut socket::CmsgSpace<[time::TimeVal; 3]>,
-    _method: PacketTimestamp,
-    _connection: &Connection,
+    _config: &AppConfig,
 ) -> nix::Result<(u64, u64)> {
     debug!("Can't retrieve timestamp on the current platform.");
     Ok((0, 0))
@@ -356,7 +383,7 @@ fn set_rt_fifo() {
         let pid = libc::getpid();
         let r = libc::sched_setscheduler(pid, libc::SCHED_FIFO, &params);
         assert_eq!(r, 0, "libc::sched_setscheduler failed");
-        debug!("Running as real time prioriy process");
+        debug!("Running thread with real time priority.");
     }
 }
 
@@ -438,10 +465,12 @@ pub fn make_socket(config: &AppConfig) -> Socket {
         Transport::Tcp => Socket::new(Domain::ipv4(), Type::stream(), None),
         Transport::Udp => Socket::new(Domain::ipv4(), Type::dgram(), None),
     }.expect("Can't create socket");
-    if config.threads > 1 {
+
+    if config.transport == Transport::Udp && config.sockets > 1 {
         debug!("Set socket reuse_port option");
         socket.set_reuse_port(true).expect("Can't set reuse port");
     }
+
     socket
 }
 

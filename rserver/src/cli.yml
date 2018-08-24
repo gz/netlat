@@ -61,6 +61,15 @@ args:
         help: What port to listen on?
         takes_value: true
         required: false
+    - socketmapping:
+        long: socketmapping
+        help: How sockets are distributed to threads (all = every thread polls all socket, onetoone = one thread handles one socket).
+        possible_values: [ "all", "onetoone" ]
+    - sockets:
+        long: sockets
+        help: How many sockets to create (UDP), how many connections to accept (TCP).
+        value_name: SOCKET_COUNT
+        takes_value: true
 
 subcommands:
     - smt:

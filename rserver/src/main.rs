@@ -28,11 +28,8 @@ use mio::Ready;
 use nix::sys::socket;
 use nix::sys::time;
 use nix::sys::uio;
-use socket2::{Domain, Socket, Type};
 
 use netbench::*;
-
-const PONG: mio::Token = mio::Token(0);
 
 #[derive(Debug)]
 struct MessageState {
@@ -64,23 +61,20 @@ impl MessageState {
 
 fn network_loop(
     config: &AppConfig,
-    connection: Connection,
+    connections: Vec<RawFd>,
     app_channel: Option<(mpsc::Sender<u64>, mpsc::Receiver<(u64, u64)>)>,
     wtr: Arc<Mutex<csv::Writer<std::fs::File>>>,
 ) {
     let poll = mio::Poll::new().expect("Can't create poll.");
 
-    let raw_fd: std::os::unix::io::RawFd = match connection {
-        Connection::Datagram(ref socket) => socket.as_raw_fd(),
-        Connection::Stream(ref stream) => stream.as_raw_fd(),
-    };
-
-    poll.register(
-        &EventedFd(&raw_fd),
-        PONG,
-        Ready::readable() | UnixReady::error(),
-        mio::PollOpt::edge() | mio::PollOpt::oneshot(),
-    ).expect("Can't register events.");
+    for (idx, connection) in connections.iter().enumerate() {
+        poll.register(
+            &EventedFd(&connection),
+            mio::Token(idx),
+            Ready::readable() | UnixReady::error(),
+            mio::PollOpt::edge() | mio::PollOpt::oneshot(),
+        ).expect("Can't register events.");
+    }
 
     let mut events = mio::Events::with_capacity(10);
     let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
@@ -100,16 +94,12 @@ fn network_loop(
         poll.poll(&mut events, None).expect("Can't poll channel");
         for event in events.iter() {
             debug!("event = {:?}", event);
+            let raw_fd: RawFd = connections[event.token().0];
 
             if UnixReady::from(event.readiness()).is_error() {
                 // TODO: do until EAGAIN
                 loop {
-                    let (id, tx_nic) = match retrieve_tx_timestamp(
-                        raw_fd,
-                        &mut time_tx,
-                        config.timestamp,
-                        &connection,
-                    ) {
+                    let (id, tx_nic) = match retrieve_tx_timestamp(raw_fd, &mut time_tx, config) {
                         Ok(data) => data,
                         Err(nix::Error::Sys(nix::errno::Errno::EAGAIN)) => break,
                         Err(e) => panic!("Unexpected error during retrieve_tx_timestamp {:?}", e),
@@ -235,28 +225,28 @@ fn network_loop(
                     ts_state.insert(st.log.id, st);
                 }
             }
+
+            // Reregister for event on the FD
+            let opts = if send_state.len() == 0 {
+                Ready::readable() | UnixReady::error()
+            } else {
+                debug!("Unable to send everything, register for writable");
+                Ready::writable() | Ready::readable() | UnixReady::error()
+            };
+
+            poll.reregister(
+                &EventedFd(&raw_fd),
+                mio::Token(event.token().0),
+                opts,
+                mio::PollOpt::edge() | mio::PollOpt::oneshot(),
+            ).expect("Can't re-register events.");
         }
-
-        // Reregister for events
-        let opts = if send_state.len() == 0 {
-            Ready::readable() | UnixReady::error()
-        } else {
-            debug!("Unable to send everything, register for writable");
-            Ready::writable() | Ready::readable() | UnixReady::error()
-        };
-
-        poll.reregister(
-            &EventedFd(&raw_fd),
-            PONG,
-            opts,
-            mio::PollOpt::edge() | mio::PollOpt::oneshot(),
-        ).expect("Can't re-register events.");
     }
 }
 
 fn _spawn_listen_pair(
     config: AppConfig,
-    connection: Connection,
+    _connections: Vec<RawFd>,
     logger: Arc<Mutex<csv::Writer<std::fs::File>>>,
 ) -> Vec<(thread::JoinHandle<()>, thread::JoinHandle<()>)> {
     let on_core: Vec<(usize, usize)> = config.core_ids.iter().map(|c: &usize| {
@@ -286,7 +276,7 @@ fn _spawn_listen_pair(
     let set_rt: bool = config.scheduler == Scheduler::Fifo;
 
     let mut handles = Vec::with_capacity(on_core.len());
-    let pair = on_core[0];
+    let _pair = on_core[0];
     let (txa, rxp) = mpsc::channel();
     let (txp, rxa) = mpsc::channel();
 
@@ -316,7 +306,7 @@ fn _spawn_listen_pair(
             }
 
             let channel = Some((txp, rxp));
-            network_loop(&(config.clone()), connection, channel, logger)
+            network_loop(&(config.clone()), vec![], channel, logger)
         }).expect("Couldn't spawn a thread");
 
     handles.push((t_app, t_poll));
@@ -324,7 +314,7 @@ fn _spawn_listen_pair(
 }
 
 fn create_connections(config: &AppConfig, address: net::SocketAddrV4) -> Vec<Connection> {
-    let mut connections: Vec<Connection> = Vec::with_capacity(config.threads);
+    let mut connections: Vec<Connection> = Vec::with_capacity(config.sockets);
 
     match config.transport {
         Transport::Tcp => {
@@ -332,33 +322,30 @@ fn create_connections(config: &AppConfig, address: net::SocketAddrV4) -> Vec<Con
             socket.bind(&address.into()).expect("Can't bind to address");
             let listener = socket.into_tcp_listener();
 
-            for _thread_id in 0..config.threads {
+            for _sock_id in 0..config.sockets {
                 let (stream, addr) = listener.accept().expect("Waiting for incoming connection");
-                let stream = mio::net::TcpStream::from_stream(stream).expect("Make mio stream");
                 info!("Incoming connection from {}", addr);
                 timestamping_enable(config, stream.as_raw_fd());
                 connections.push(Connection::Stream(stream));
             }
         }
         Transport::Udp => {
-            let mut sockets = Vec::with_capacity(config.threads);
+            let mut sockets = Vec::with_capacity(config.sockets);
             // With SO_REUSEPORT we need to set the option before we bind,
             // in the match statement below
-            for _thread in 0..config.threads {
+            for _sock_id in 0..config.sockets {
                 sockets.push(make_socket(config));
             }
 
             for socket in sockets {
                 socket.bind(&address.into()).expect("Can't bind to address");
                 timestamping_enable(config, socket.as_raw_fd());
-
-                connections.push(Connection::Datagram(
-                    mio::net::UdpSocket::from_socket(socket.into_udp_socket())
-                        .expect("Couldn't make mio UDP socket from socket."),
-                ));
+                connections.push(Connection::Datagram(socket.into_udp_socket()));
             }
         }
     }
+
+    assert!(connections.len() == config.sockets);
 
     connections
 }
@@ -374,6 +361,8 @@ fn main() {
         address, config.core_ids
     );
 
+    debug!("{:?}", config);
+
     /*if let Some(_) = matches.subcommand_matches("smt") {
         let handles = spawn_listen_pair(config, connection, logger);
         for (tapp, tpoll) in handles {
@@ -384,20 +373,34 @@ fn main() {
 
     let mut threads = Vec::with_capacity(config.threads);
     let connections = create_connections(&config, address);
+    let raw_connections: Vec<RawFd> = connections.iter().map(|sock| sock.as_raw_fd()).collect();
+
     let logfile = format!("latencies-rserver-{}.csv", config.output);
     let logger = create_writer(logfile.clone(), LOGFILE_SIZE);
 
+    // If every core gets just one socket we should have as many sockets as cores
+    assert!(!(config.socketmapping == SocketMapping::OneToOne && config.threads != config.sockets));
+
     if let Some(_) = matches.subcommand_matches("mt") {
-        for (idx, connection) in connections.into_iter().enumerate() {
+        for idx in 0..config.threads {
             let config = config.clone();
             let logger = logger.clone();
+            let connections_to_handle = match config.socketmapping {
+                SocketMapping::All => raw_connections.clone(),
+                SocketMapping::OneToOne => vec![raw_connections[idx]],
+            };
+            debug!(
+                "Spawning thread to handle connection(s) = {:?}",
+                connections_to_handle
+            );
+
             let t = thread::Builder::new()
                 .name(format!("rserver-{}", idx))
                 .stack_size(1024 * 1024 * 2)
                 .spawn(move || {
                     set_thread_affinity(&config, idx);
                     set_scheduling(&config);
-                    network_loop(&config, connection, None, logger);
+                    network_loop(&config, connections_to_handle, None, logger);
                 }).expect("Couldn't spawn a thread");
             threads.push(t);
         }
@@ -408,10 +411,6 @@ fn main() {
         assert!(config.threads == 1);
         set_thread_affinity(&config, 0);
         set_scheduling(&config);
-        let connection = create_connections(&config, address)
-            .into_iter()
-            .next()
-            .unwrap();
-        network_loop(&config, connection, None, logger);
+        network_loop(&config, raw_connections, None, logger);
     }
 }

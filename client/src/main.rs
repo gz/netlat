@@ -13,6 +13,7 @@ extern crate prctl;
 use std::collections::HashMap;
 use std::net;
 use std::os::unix::io::AsRawFd;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -77,10 +78,9 @@ impl Default for MessageState {
     }
 }
 
-fn log_packet(wtr: &Arc<Mutex<csv::Writer<std::fs::File>>>, record: &LogRecord, packets: &mut u64) {
+fn log_packet(wtr: &Arc<Mutex<csv::Writer<std::fs::File>>>, record: &LogRecord) {
     let mut logfile = wtr.lock().unwrap();
     logfile.serialize(&record).expect("Can't write record.");
-    *packets = *packets + 1;
 }
 
 fn end_network_loop(
@@ -136,6 +136,7 @@ fn network_loop(
     config: AppConfig,
     connection: Connection,
     barrier: std::sync::Arc<std::sync::Barrier>,
+    request_id: Arc<AtomicUsize>,
     wtr: Arc<Mutex<csv::Writer<std::fs::File>>>,
 ) {
     println!(
@@ -146,10 +147,7 @@ fn network_loop(
     let poll = mio::Poll::new().expect("Can't create poll.");
     let mut events = mio::Events::with_capacity(10);
 
-    let raw_fd: std::os::unix::io::RawFd = match connection {
-        Connection::Datagram(ref socket) => socket.as_raw_fd(),
-        Connection::Stream(ref stream) => stream.as_raw_fd(),
-    };
+    let raw_fd: std::os::unix::io::RawFd = connection.as_raw_fd();
 
     poll.register(
         &EventedFd(&raw_fd),
@@ -164,8 +162,6 @@ fn network_loop(
 
     let timeout = Duration::from_millis(1000); // After 1000ms we consider the packet lost
     let mut last_sent = Instant::now();
-    let mut packet_count: u64 = 0; // Number of packets completed
-    let mut packet_id: u64 = 1; // Unique ID included in every packet (must start at one since ID zero signals end of test on server)
 
     let mut time_rx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
     let mut time_tx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
@@ -181,11 +177,17 @@ fn network_loop(
             .expect("Can't poll channel");
         //debug!("events is = {:?}", events);
         for event in events.iter() {
-            //debug!("Got event is = {:?}", event);
+            debug!("Got {:?}", event);
             // Send a packet
             if (state_machine == HandlerState::SendPacket || config.flood)
                 && event.readiness().is_writable()
             {
+                let packet_id = request_id.fetch_add(1, Ordering::SeqCst) as u64;
+                if packet_id > config.requests as u64 {
+                    end_network_loop(&wtr, message_state, raw_fd, &config);
+                    return;
+                }
+
                 // Temporarily change process name (for better traceability with perf)
                 set_process_name(format!("pkt-{}", packet_id).as_str());
                 let tx_app = now();
@@ -202,22 +204,16 @@ fn network_loop(
                 last_sent = Instant::now();
 
                 message_state.insert(packet_id, MessageState::new(packet_id, tx_app));
-                packet_id = packet_id + 1;
 
                 state_machine = HandlerState::WaitForReply;
-                debug!("Sent packet {}", packet_id - 1);
+                debug!("Sent packet {}", packet_id);
             }
 
-            if (state_machine == HandlerState::ReadSentTimestamp || config.flood)
-                && mio::unix::UnixReady::from(event.readiness()).is_error()
-            {
+            if
+            //(state_machine == HandlerState::ReadSentTimestamp || config.flood) &&
+            mio::unix::UnixReady::from(event.readiness()).is_error() {
                 loop {
-                    let (id, tx_nic) = match retrieve_tx_timestamp(
-                        raw_fd,
-                        &mut time_tx,
-                        config.timestamp,
-                        &connection,
-                    ) {
+                    let (id, tx_nic) = match retrieve_tx_timestamp(raw_fd, &mut time_tx, &config) {
                         Ok(data) => data,
                         Err(nix::Error::Sys(nix::errno::Errno::EAGAIN)) => break,
                         Err(e) => panic!("Unexpected error during retrieve_tx_timestamp {:?}", e),
@@ -238,8 +234,9 @@ fn network_loop(
                             .remove(&id)
                             .expect("Can't remove completed packet");
                         mst.log.completed = true;
-                        log_packet(&wtr, &mst.log, &mut packet_count);
-                        if packet_count == config.requests {
+                        log_packet(&wtr, &mst.log);
+
+                        if id == config.requests as u64 {
                             end_network_loop(&wtr, message_state, raw_fd, &config);
                             return;
                         } else {
@@ -280,8 +277,8 @@ fn network_loop(
                             .remove(&id)
                             .expect("Can't remove complete packet");
                         mst.log.completed = true;
-                        log_packet(&wtr, &mst.log, &mut packet_count);
-                        if packet_count == config.requests {
+                        log_packet(&wtr, &mst.log);
+                        if id == config.requests as u64 {
                             end_network_loop(&wtr, message_state, raw_fd, &config);
                             return;
                         } else {
@@ -301,7 +298,7 @@ fn network_loop(
             error!("Not getting any replies?");
             // Make sure we read the timestamp of the dropped packet so error queue is clear again
             // I guess this is the proper way to do it...
-            match retrieve_tx_timestamp(raw_fd, &mut time_tx, config.timestamp, &connection) {
+            match retrieve_tx_timestamp(raw_fd, &mut time_tx, &config) {
                 Ok(_) => (), // Throw away result
                 Err(nix::Error::Sys(nix::errno::Errno::EAGAIN)) => {
                     panic!("We should timestamp by now")
@@ -313,6 +310,7 @@ fn network_loop(
 
         // Reregister for events
         let opts = if state_machine == HandlerState::SendPacket {
+            debug!("need to send packet, register for writing");
             Ready::writable() | Ready::readable() | UnixReady::error()
         } else {
             Ready::readable() | UnixReady::error()
@@ -345,10 +343,8 @@ fn create_connections(config: &AppConfig, address: net::SocketAddrV4) -> Vec<Con
                 socket
                     .connect(&destination_address.into())
                     .expect("Can't connect to address");
-                let stream = mio::net::TcpStream::from_stream(socket.into_tcp_stream())
-                    .expect("Can't create TCP socket");
-                timestamping_enable(&config, stream.as_raw_fd());
-                connections.push(Connection::Stream(stream));
+                timestamping_enable(&config, socket.as_raw_fd());
+                connections.push(Connection::Stream(socket.into_tcp_stream()));
             }
         }
         Transport::Udp => {
@@ -371,11 +367,9 @@ fn create_connections(config: &AppConfig, address: net::SocketAddrV4) -> Vec<Con
                     .connect(&destination_address.into())
                     .expect(format!("Can't connect to {}", destination_address).as_str());
 
-                let stream = mio::net::UdpSocket::from_socket(socket.into_udp_socket())
-                    .expect("Can't create UDP socket");
-                timestamping_enable(&config, stream.as_raw_fd());
+                timestamping_enable(&config, socket.as_raw_fd());
 
-                connections.push(Connection::Datagram(stream));
+                connections.push(Connection::Datagram(socket.into_udp_socket()));
             }
         }
     }
@@ -397,18 +391,20 @@ fn main() {
     let mut handles = Vec::with_capacity(connections.len());
 
     let output = format!("latencies-client-{}.csv", config.output);
-    let wtr = create_writer(output.clone(), 50 * 1024 * 1024);
+    let wtr = create_writer(output.clone(), LOGFILE_SIZE);
+    let request_id = Arc::new(AtomicUsize::new(1));
 
     // Spawn a new thread for every client
     for (id, connection) in connections.into_iter().enumerate() {
         let barrier = barrier.clone();
         let config = config.clone();
         let wtr = wtr.clone();
+        let request_id = request_id.clone();
 
         handles.push(thread::spawn(move || {
             set_thread_affinity(&config, id);
             set_scheduling(&config);
-            network_loop(config, connection, barrier, wtr)
+            network_loop(config, connection, barrier, request_id, wtr)
         }));
     }
 
