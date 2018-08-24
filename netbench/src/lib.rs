@@ -57,7 +57,7 @@ pub enum Transport {
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize)]
 pub enum Scheduler {
-    None,
+    Default,
     Fifo,
 }
 
@@ -133,7 +133,7 @@ impl AppConfig {
 
         let scheduler = match matches.value_of("scheduler").unwrap_or("none") {
             "rt" => Scheduler::Fifo,
-            "none" => Scheduler::None,
+            "none" => Scheduler::Default,
             _ => unreachable!(
                 "Invalid CLI argument, may be clap bug if possible_values doesn't work?"
             ),
@@ -402,27 +402,19 @@ pub fn set_process_name(name: &str) {
     error!("set_process_name is not supported on the current platform!");
 }
 
-pub fn set_thread_affinity(config: &AppConfig, thread_id: usize) {
-    match config.mapping {
-        ThreadMapping::All => {
-            debug!(
-                "Set affinity for thread {} to cpu {:?}",
-                thread_id, config.core_ids
-            );
-            pin_thread(&config.core_ids);
-        }
-        ThreadMapping::OneToOne => {
-            let core = config.core_ids[thread_id % config.core_ids.len()];
-            debug!("Set affinity for thread {} to cpu {:?}", thread_id, core);
-            pin_thread(&vec![core]);
-        }
-    }
+pub fn set_thread_affinity(config: &AppConfig, thread_id: usize) -> Vec<usize> {
+    let pin_to = match config.mapping {
+        ThreadMapping::All => config.core_ids.clone(),
+        ThreadMapping::OneToOne => vec![config.core_ids[thread_id % config.core_ids.len()]],
+    };
+    pin_thread(&pin_to);
+    pin_to
 }
 
 pub fn set_scheduling(config: &AppConfig) {
     match config.scheduler {
         Scheduler::Fifo => set_rt_fifo(),
-        Scheduler::None => debug!("Default scheduling"),
+        Scheduler::Default => debug!("Default scheduling"),
     }
 }
 
@@ -470,6 +462,10 @@ pub fn make_socket(config: &AppConfig) -> Socket {
         debug!("Set socket reuse_port option");
         socket.set_reuse_port(true).expect("Can't set reuse port");
     }
+
+    socket
+        .set_nonblocking(true)
+        .expect("Can't set it to blocking mode");
 
     socket
 }

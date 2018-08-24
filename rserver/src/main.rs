@@ -64,6 +64,8 @@ fn network_loop(
     connections: Vec<RawFd>,
     app_channel: Option<(mpsc::Sender<u64>, mpsc::Receiver<(u64, u64)>)>,
     wtr: Arc<Mutex<csv::Writer<std::fs::File>>>,
+    send_state: Arc<Mutex<VecDeque<MessageState>>>,
+    ts_state: Arc<Mutex<HashMap<u64, MessageState>>>,
 ) {
     let poll = mio::Poll::new().expect("Can't create poll.");
 
@@ -80,15 +82,11 @@ fn network_loop(
     let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
     recv_buf.resize(8, 0);
 
-    let mut packet_count = 0;
-
     let mut time_rx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
     let mut time_tx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
 
     // If this fails think about allocating it on the heap instead of copy?
     assert!(std::mem::size_of::<MessageState>() < 256);
-    let mut send_state: VecDeque<MessageState> = VecDeque::with_capacity(1024);
-    let mut ts_state: HashMap<u64, MessageState> = HashMap::with_capacity(1024);
 
     loop {
         poll.poll(&mut events, None).expect("Can't poll channel");
@@ -106,6 +104,7 @@ fn network_loop(
                     };
 
                     debug!("read from err queue id={} tx_nic={}", id, tx_nic);
+                    let mut ts_state = ts_state.lock().unwrap();
                     ts_state.remove(&id).map_or_else(
                         || {
                             panic!("Packet state for id {} not found?", id);
@@ -119,8 +118,6 @@ fn network_loop(
                             // Log all the timestamps
                             let mut logfile = wtr.lock().unwrap();
                             logfile.serialize(&st.log).expect("Can't write record.");
-
-                            packet_count = packet_count + 1;
                         },
                     );
                 }
@@ -131,6 +128,7 @@ fn network_loop(
                 debug!("Read packet");
                 // Get the packet
                 loop {
+                    debug!("Trying to recv?");
                     let msg = match socket::recvmsg(
                         raw_fd,
                         &[uio::IoVec::from_mut_slice(&mut recv_buf)],
@@ -152,7 +150,7 @@ fn network_loop(
                         .as_slice()
                         .read_u64::<BigEndian>()
                         .expect("Can't parse timestamp");
-                    debug!("Received packet {} id={}", packet_count, packet_id);
+                    debug!("Received packet id={}", packet_id);
 
                     let rx_ht = app_channel.as_ref().map_or(0, |(txp, rxp)| {
                         txp.send(packet_id)
@@ -168,26 +166,32 @@ fn network_loop(
                     if packet_id == 0 {
                         debug!("Client sent 0, flushing logfile.");
                         let mut logfile = wtr.lock().unwrap();
+                        let send_state = send_state.lock().unwrap();
+                        let ts_state = ts_state.lock().unwrap();
 
                         // Log packets that probably didn't make it back
-                        for packet in &send_state {
+                        for packet in &*send_state {
                             logfile.serialize(&packet.log).expect("Can't write record.");
                         }
-                        for (_id, packet) in &ts_state {
+                        for (_id, packet) in &*ts_state {
                             logfile.serialize(&packet.log).expect("Can't write record.");
                         }
                         logfile.flush().expect("Can't flush logfile");
                     } else {
+                        debug!("Adding packet to send_state");
                         let mst = MessageState::new(packet_id, msg.address, rx_app, rx_nic, rx_ht);
-                        send_state.push_back(mst);
+                        let mut send_state = send_state.lock().unwrap();
+                        (*send_state).push_back(mst);
                     }
                 }
             }
 
             // Send a packet
             // TODO: make sure we try to send the first time we receive something again
-            if send_state.len() > 0 || event.readiness().is_writable() {
+            if event.readiness().is_writable() {
+                let mut send_state = send_state.lock().unwrap();
                 while send_state.len() > 0 {
+                    debug!("Trying to send...");
                     let mut st = send_state.pop_front().expect("We need an item");
                     st.log.tx_app = now();
                     recv_buf.clear();
@@ -204,6 +208,7 @@ fn network_loop(
                         ) {
                             Ok(bytes_sent) => bytes_sent,
                             Err(nix::Error::Sys(nix::errno::Errno::EAGAIN)) => {
+                                debug!("Got EAGAIN, when trying to reply...");
                                 send_state.push_front(st);
                                 break;
                             }
@@ -222,10 +227,12 @@ fn network_loop(
 
                     debug!("sent reply");
                     assert_eq!(bytes_sent, 8);
+                    let mut ts_state = ts_state.lock().unwrap();
                     ts_state.insert(st.log.id, st);
                 }
             }
 
+            let send_state = send_state.lock().unwrap();
             // Reregister for event on the FD
             let opts = if send_state.len() == 0 {
                 Ready::readable() | UnixReady::error()
@@ -234,6 +241,7 @@ fn network_loop(
                 Ready::writable() | Ready::readable() | UnixReady::error()
             };
 
+            debug!("Reregister for {:?} with opts {:?}", raw_fd, opts);
             poll.reregister(
                 &EventedFd(&raw_fd),
                 mio::Token(event.token().0),
@@ -277,8 +285,8 @@ fn _spawn_listen_pair(
 
     let mut handles = Vec::with_capacity(on_core.len());
     let _pair = on_core[0];
-    let (txa, rxp) = mpsc::channel();
-    let (txp, rxa) = mpsc::channel();
+    //let (txa, rxp) = mpsc::channel();
+    //let (txp, rxa) = mpsc::channel();
 
     let t_app_name = String::from("rserver/app");
     let t_app = thread::Builder::new()
@@ -290,9 +298,9 @@ fn _spawn_listen_pair(
                 //set_rt_fifo();
             }
 
-            let payload = rxa.recv().expect("Can't receive data on app thread.");
-            txa.send((payload, now()))
-                .expect("Can't send data to network thread.");
+            //let payload = rxa.recv().expect("Can't receive data on app thread.");
+            //txa.send((payload, now()))
+            //    .expect("Can't send data to network thread.");
         }).expect("Can't spawn application thread");
 
     let t_poll_name = String::from("rserver/polling");
@@ -305,8 +313,8 @@ fn _spawn_listen_pair(
                 //set_rt_fifo();
             }
 
-            let channel = Some((txp, rxp));
-            network_loop(&(config.clone()), vec![], channel, logger)
+            //let channel = Some((txp, rxp));
+            //network_loop(&(config.clone()), vec![], channel, logger)
         }).expect("Couldn't spawn a thread");
 
     handles.push((t_app, t_poll));
@@ -319,6 +327,9 @@ fn create_connections(config: &AppConfig, address: net::SocketAddrV4) -> Vec<Con
     match config.transport {
         Transport::Tcp => {
             let socket = make_socket(config);
+            socket
+                .set_nonblocking(false)
+                .expect("Can't unset nonblocking mode for listener");
             socket.bind(&address.into()).expect("Can't bind to address");
             let listener = socket.into_tcp_listener();
 
@@ -361,7 +372,7 @@ fn main() {
         address, config.core_ids
     );
 
-    debug!("{:?}", config);
+    debug!("{:#?}", config);
 
     /*if let Some(_) = matches.subcommand_matches("smt") {
         let handles = spawn_listen_pair(config, connection, logger);
@@ -381,36 +392,45 @@ fn main() {
     // If every core gets just one socket we should have as many sockets as cores
     assert!(!(config.socketmapping == SocketMapping::OneToOne && config.threads != config.sockets));
 
+    let send_state: Arc<Mutex<VecDeque<MessageState>>> =
+        Arc::new(Mutex::new(VecDeque::with_capacity(1024)));
+    let ts_state: Arc<Mutex<HashMap<u64, MessageState>>> =
+        Arc::new(Mutex::new(HashMap::with_capacity(1024)));
+
     if let Some(_) = matches.subcommand_matches("mt") {
         for idx in 0..config.threads {
             let config = config.clone();
             let logger = logger.clone();
+            let send_state = send_state.clone();
+            let ts_state = ts_state.clone();
             let connections_to_handle = match config.socketmapping {
                 SocketMapping::All => raw_connections.clone(),
                 SocketMapping::OneToOne => vec![raw_connections[idx]],
             };
-            debug!(
-                "Spawning thread to handle connection(s) = {:?}",
-                connections_to_handle
-            );
 
             let t = thread::Builder::new()
                 .name(format!("rserver-{}", idx))
                 .stack_size(1024 * 1024 * 2)
                 .spawn(move || {
-                    set_thread_affinity(&config, idx);
+                    let pinned_to = set_thread_affinity(&config, idx);
                     set_scheduling(&config);
-                    network_loop(&config, connections_to_handle, None, logger);
+                    info!(
+                        "Spawning network thread {} on cores {:?} scheduled as {:?} to handle connection(s) = {:?}",
+                        idx, pinned_to, config.scheduler, connections_to_handle
+                    );
+                    network_loop(&config, connections_to_handle, None, logger, send_state, ts_state);
                 }).expect("Couldn't spawn a thread");
             threads.push(t);
         }
         for thread in threads.into_iter() {
             thread.join().expect("Can't wait for thread?");
         }
-    } else if let Some(_) = matches.subcommand_matches("single") {
+    }
+
+    /*else if let Some(_) = matches.subcommand_matches("single") {
         assert!(config.threads == 1);
         set_thread_affinity(&config, 0);
         set_scheduling(&config);
         network_loop(&config, raw_connections, None, logger);
-    }
+    }*/
 }
