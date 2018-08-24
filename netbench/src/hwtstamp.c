@@ -60,11 +60,11 @@ int enable_hwtstamp(int sock, char *interface, bool hw)
     {
         if (ioctl(sock, SIOCSHWTSTAMP, &hwtstamp) < 0)
         {
+            fprintf(stderr, "HW Timestamping failed to enable\n");
             return -1;
         }
         else
         {
-            fprintf(stderr, "HW Timestamping\n");
             so_timestamping_flags |= SOF_TIMESTAMPING_RAW_HARDWARE;
             so_timestamping_flags |= SOF_TIMESTAMPING_TX_HARDWARE;
             so_timestamping_flags |= SOF_TIMESTAMPING_RX_HARDWARE;

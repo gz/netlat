@@ -81,12 +81,16 @@ fn network_loop(
     let mut events = mio::Events::with_capacity(10);
     let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
     recv_buf.resize(8, 0);
+    let mut write_saw_egain: bool = false;
 
     let mut time_rx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
     let mut time_tx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
 
     // If this fails think about allocating it on the heap instead of copy?
     assert!(std::mem::size_of::<MessageState>() < 256);
+
+    debug!("Set process name to {}", format!("pkt-{}", 1));
+    set_process_name(format!("pkt-{}", 1).as_str());
 
     loop {
         poll.poll(&mut events, None).expect("Can't poll channel");
@@ -95,7 +99,6 @@ fn network_loop(
             let raw_fd: RawFd = connections[event.token().0];
 
             if UnixReady::from(event.readiness()).is_error() {
-                // TODO: do until EAGAIN
                 loop {
                     let (id, tx_nic) = match retrieve_tx_timestamp(raw_fd, &mut time_tx, config) {
                         Ok(data) => data,
@@ -120,15 +123,16 @@ fn network_loop(
                             logfile.serialize(&st.log).expect("Can't write record.");
                         },
                     );
+
+                    debug!("Set process name to {}", format!("pkt-{}", id + 1));
+                    set_process_name(format!("pkt-{}", id + 1).as_str());
                 }
             }
 
             // Receive a packet
             if event.readiness().is_readable() {
-                debug!("Read packet");
                 // Get the packet
                 loop {
-                    debug!("Trying to recv?");
                     let msg = match socket::recvmsg(
                         raw_fd,
                         &[uio::IoVec::from_mut_slice(&mut recv_buf)],
@@ -178,7 +182,7 @@ fn network_loop(
                         }
                         logfile.flush().expect("Can't flush logfile");
                     } else {
-                        debug!("Adding packet to send_state");
+                        debug!("Storing packet in send_state");
                         let mst = MessageState::new(packet_id, msg.address, rx_app, rx_nic, rx_ht);
                         let mut send_state = send_state.lock().unwrap();
                         (*send_state).push_back(mst);
@@ -188,10 +192,9 @@ fn network_loop(
 
             // Send a packet
             // TODO: make sure we try to send the first time we receive something again
-            if event.readiness().is_writable() {
+            if event.readiness().is_writable() || !write_saw_egain {
                 let mut send_state = send_state.lock().unwrap();
                 while send_state.len() > 0 {
-                    debug!("Trying to send...");
                     let mut st = send_state.pop_front().expect("We need an item");
                     st.log.tx_app = now();
                     recv_buf.clear();
@@ -209,6 +212,7 @@ fn network_loop(
                             Ok(bytes_sent) => bytes_sent,
                             Err(nix::Error::Sys(nix::errno::Errno::EAGAIN)) => {
                                 debug!("Got EAGAIN, when trying to reply...");
+                                write_saw_egain = true;
                                 send_state.push_front(st);
                                 break;
                             }
@@ -225,7 +229,7 @@ fn network_loop(
                         }
                     };
 
-                    debug!("sent reply");
+                    debug!("Sent reply for id={}", st.log.id);
                     assert_eq!(bytes_sent, 8);
                     let mut ts_state = ts_state.lock().unwrap();
                     ts_state.insert(st.log.id, st);
@@ -384,13 +388,11 @@ fn main() {
 
     let mut threads = Vec::with_capacity(config.threads);
     let connections = create_connections(&config, address);
+    assert!(connections.len() == config.sockets);
     let raw_connections: Vec<RawFd> = connections.iter().map(|sock| sock.as_raw_fd()).collect();
 
     let logfile = format!("latencies-rserver-{}.csv", config.output);
     let logger = create_writer(logfile.clone(), LOGFILE_SIZE);
-
-    // If every core gets just one socket we should have as many sockets as cores
-    assert!(!(config.socketmapping == SocketMapping::OneToOne && config.threads != config.sockets));
 
     let send_state: Arc<Mutex<VecDeque<MessageState>>> =
         Arc::new(Mutex::new(VecDeque::with_capacity(1024)));
@@ -405,7 +407,11 @@ fn main() {
             let ts_state = ts_state.clone();
             let connections_to_handle = match config.socketmapping {
                 SocketMapping::All => raw_connections.clone(),
-                SocketMapping::OneToOne => vec![raw_connections[idx]],
+                SocketMapping::OneToOne => {
+                    // If every core gets just one socket we should have as many sockets as cores
+                    assert!(config.threads == config.sockets);
+                    vec![raw_connections[idx]]
+                }
             };
 
             let t = thread::Builder::new()

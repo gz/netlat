@@ -261,7 +261,6 @@ pub fn retrieve_tx_timestamp(
         socket::MsgFlags::MSG_ERRQUEUE,
     ));
 
-    debug!("msg = {:?}", msg.bytes);
     let payload_id = recv_buf[pkt_size - 8..]
         .as_ref()
         .read_u64::<BigEndian>()
