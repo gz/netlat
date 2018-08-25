@@ -34,6 +34,7 @@ use netbench::*;
 #[derive(Debug)]
 struct MessageState {
     sender: Option<socket::SockAddr>,
+    sock: RawFd,
     log: LogRecord,
 }
 
@@ -41,6 +42,7 @@ impl MessageState {
     fn new(
         id: u64,
         sender: Option<socket::SockAddr>,
+        sock: RawFd,
         rx_app: u64,
         rx_nic: u64,
         rx_ht: u64,
@@ -54,6 +56,7 @@ impl MessageState {
 
         MessageState {
             sender: sender,
+            sock: sock,
             log: log,
         }
     }
@@ -65,15 +68,17 @@ impl MessageState {
 
 fn network_loop(
     config: &AppConfig,
+    //connections: Vec<Arc<Mutex<RawFd>>>,
     connections: Vec<RawFd>,
     app_channel: Option<(mpsc::Sender<u64>, mpsc::Receiver<(u64, u64)>)>,
     wtr: Arc<Mutex<csv::Writer<std::fs::File>>>,
-    send_state: Arc<Mutex<VecDeque<MessageState>>>,
+    send_state: HashMap<RawFd, Arc<Mutex<VecDeque<MessageState>>>>,
     ts_state: Arc<Mutex<HashMap<u64, MessageState>>>,
 ) {
     let poll = mio::Poll::new().expect("Can't create poll.");
 
     for (idx, connection) in connections.iter().enumerate() {
+        //let connection = connection.lock().unwrap();
         poll.register(
             &EventedFd(&connection),
             mio::Token(idx),
@@ -86,6 +91,8 @@ fn network_loop(
     let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
     recv_buf.resize(8, 0);
     let mut write_saw_egain: bool = false;
+
+    let mut min_seen: u64 = u64::max_value();
 
     let mut time_rx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
     let mut time_tx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
@@ -100,6 +107,7 @@ fn network_loop(
         poll.poll(&mut events, None).expect("Can't poll channel");
         for event in events.iter() {
             debug!("event = {:?}", event);
+            //let raw_fd: RawFd = *connections[event.token().0].lock().unwrap();
             let raw_fd: RawFd = connections[event.token().0];
 
             if UnixReady::from(event.readiness()).is_error() {
@@ -145,6 +153,7 @@ fn network_loop(
                     ) {
                         Ok(msg) => msg,
                         Err(nix::Error::Sys(nix::errno::Errno::EAGAIN)) => break,
+                        Err(nix::Error::Sys(nix::errno::Errno::ENOMSG)) => break,
                         Err(e) => panic!("Unexpected error during socket::recvmsg {:?}", e),
                     };
 
@@ -173,9 +182,9 @@ fn network_loop(
 
                     if packet_id == 0 {
                         debug!("Client sent 0, flushing logfile.");
-                        let mut logfile = wtr.lock().unwrap();
-                        let send_state = send_state.lock().unwrap();
+                        let send_state = send_state[&raw_fd].lock().unwrap();
                         let ts_state = ts_state.lock().unwrap();
+                        let mut logfile = wtr.lock().unwrap();
 
                         // Log packets that probably didn't make it back
                         for packet in &*send_state {
@@ -185,13 +194,24 @@ fn network_loop(
                             logfile.serialize(&packet.log).expect("Can't write record.");
                         }
                         logfile.flush().expect("Can't flush logfile");
+                        println!("Min latency was {}", min_seen);
                     } else {
                         debug!("Storing packet in send_state");
-                        let mst = MessageState::new(packet_id, msg.address, rx_app, rx_nic, rx_ht);
+                        let mst = MessageState::new(
+                            packet_id,
+                            msg.address,
+                            raw_fd,
+                            rx_app,
+                            rx_nic,
+                            rx_ht,
+                        );
                         if packet_id % 5000 == 0 {
-                            info!("packet {} took {} ns", packet_id, mst.linux_rx_latency());
+                            println!("packet {} took {} ns", packet_id, mst.linux_rx_latency());
                         }
-                        let mut send_state = send_state.lock().unwrap();
+                        if mst.linux_rx_latency() < min_seen {
+                            min_seen = mst.linux_rx_latency();
+                        }
+                        let mut send_state = send_state[&raw_fd].lock().unwrap();
                         (*send_state).push_back(mst);
                     }
                 }
@@ -200,9 +220,11 @@ fn network_loop(
             // Send a packet
             // TODO: make sure we try to send the first time we receive something again
             if event.readiness().is_writable() || !write_saw_egain {
-                let mut send_state = send_state.lock().unwrap();
+                let mut send_state = send_state[&raw_fd].lock().unwrap();
                 while send_state.len() > 0 {
                     let mut st = send_state.pop_front().expect("We need an item");
+                    assert!(config.transport != Transport::Tcp); // fix st.sock == raw_fd
+
                     st.log.tx_app = now();
                     recv_buf.clear();
                     recv_buf
@@ -221,6 +243,12 @@ fn network_loop(
                             Ok(bytes_sent) => bytes_sent,
                             Err(nix::Error::Sys(nix::errno::Errno::EAGAIN)) => {
                                 debug!("Got EAGAIN, when trying to reply...");
+                                write_saw_egain = true;
+                                send_state.push_front(st);
+                                break;
+                            }
+                            Err(nix::Error::Sys(nix::errno::Errno::ENOMSG)) => {
+                                debug!("Got ENOMSG, when trying to reply...");
                                 write_saw_egain = true;
                                 send_state.push_front(st);
                                 break;
@@ -244,7 +272,7 @@ fn network_loop(
                 }
             }
 
-            let send_state = send_state.lock().unwrap();
+            let send_state = send_state[&raw_fd].lock().unwrap();
             // Reregister for event on the FD
             let opts = if send_state.len() == 0 {
                 Ready::readable() | UnixReady::error()
@@ -397,13 +425,22 @@ fn main() {
     let mut threads = Vec::with_capacity(config.threads);
     let connections = create_connections(&config, address);
     assert!(connections.len() == config.sockets);
-    let raw_connections: Vec<RawFd> = connections.iter().map(|sock| sock.as_raw_fd()).collect();
+    //let raw_connections: Vec<Arc<Mutex<RawFd>>> = connections
+    let raw_connections: Vec<RawFd> = connections
+        .iter()
+        //.map(|sock| Arc::new(Mutex::new(sock.as_raw_fd())))
+        .map(|sock| sock.as_raw_fd())
+        .collect();
 
     let logfile = format!("latencies-rserver-{}.csv", config.output);
     let logger = create_writer(logfile.clone(), LOGFILE_SIZE);
 
-    let send_state: Arc<Mutex<VecDeque<MessageState>>> =
-        Arc::new(Mutex::new(VecDeque::with_capacity(1024)));
+    let mut send_state: HashMap<RawFd, Arc<Mutex<VecDeque<MessageState>>>> =
+        HashMap::with_capacity(raw_connections.len());
+    for fd in raw_connections.iter() {
+        send_state.insert(*fd, Arc::new(Mutex::new(VecDeque::with_capacity(1024))));
+    }
+    assert!(send_state.len() == raw_connections.len());
     let ts_state: Arc<Mutex<HashMap<u64, MessageState>>> =
         Arc::new(Mutex::new(HashMap::with_capacity(1024)));
 
@@ -418,7 +455,7 @@ fn main() {
                 SocketMapping::OneToOne => {
                     // If every core gets just one socket we should have as many sockets as cores
                     assert!(config.threads == config.sockets);
-                    vec![raw_connections[idx]]
+                    vec![raw_connections[idx].clone()]
                 }
             };
 
