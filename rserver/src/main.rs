@@ -57,6 +57,10 @@ impl MessageState {
             log: log,
         }
     }
+
+    fn linux_rx_latency(&self) -> u64 {
+        (self.log.rx_app + 36 * 1_000_000_000) - self.log.rx_nic
+    }
 }
 
 fn network_loop(
@@ -184,6 +188,9 @@ fn network_loop(
                     } else {
                         debug!("Storing packet in send_state");
                         let mst = MessageState::new(packet_id, msg.address, rx_app, rx_nic, rx_ht);
+                        if packet_id % 5000 == 0 {
+                            info!("packet {} took {} ns", packet_id, mst.linux_rx_latency());
+                        }
                         let mut send_state = send_state.lock().unwrap();
                         (*send_state).push_back(mst);
                     }
