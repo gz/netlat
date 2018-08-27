@@ -160,7 +160,7 @@ fn network_loop(
     let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
     recv_buf.resize(8, 0);
 
-    let timeout = Duration::from_millis(1000); // After 1000ms we consider the packet lost
+    let timeout = Duration::from_millis(2000); // After 2s we consider the packet lost
     let mut last_sent = Instant::now();
 
     let mut time_rx: socket::CmsgSpace<[time::TimeVal; 3]> = socket::CmsgSpace::new();
@@ -196,8 +196,12 @@ fn network_loop(
                     .write_u64::<BigEndian>(packet_id)
                     .expect("Serialize time");
 
-                let bytes_sent = socket::send(raw_fd, &packet_buffer, socket::MsgFlags::empty())
-                    .expect("Sending packet failed.");
+                let bytes_sent =
+                    match socket::send(raw_fd, &packet_buffer, socket::MsgFlags::empty()) {
+                        Ok(bytes_sent) => bytes_sent,
+                        //Err(nix::Error::Sys(nix::errno::Errno::EAGAIN)) => break,
+                        Err(e) => panic!("Unexpected error during socket::send {:?}", e),
+                    };
 
                 assert_eq!(bytes_sent, 8);
                 packet_buffer.clear();

@@ -194,7 +194,7 @@ fn network_loop(
                             logfile.serialize(&packet.log).expect("Can't write record.");
                         }
                         logfile.flush().expect("Can't flush logfile");
-                        println!("Min latency was {}", min_seen);
+                        info!("Min latency was {}", min_seen);
                     } else {
                         debug!("Storing packet in send_state");
                         let mst = MessageState::new(
@@ -206,7 +206,7 @@ fn network_loop(
                             rx_ht,
                         );
                         if packet_id % 5000 == 0 {
-                            println!("packet {} took {} ns", packet_id, mst.linux_rx_latency());
+                            info!("packet {} took {} ns", packet_id, mst.linux_rx_latency());
                         }
                         if mst.linux_rx_latency() < min_seen {
                             min_seen = mst.linux_rx_latency();
