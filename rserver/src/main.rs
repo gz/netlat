@@ -453,7 +453,13 @@ fn main() {
             let connections_to_handle = match config.socketmapping {
                 SocketMapping::All => raw_connections.clone(),
                 SocketMapping::RoundRobin => {
-                    vec![raw_connections[idx % raw_connections.len()].clone()]
+                    let mut rr = vec![];
+                    for (cnt, conn) in raw_connections.clone().into_iter().enumerate() {
+                        if (cnt % config.threads) == idx {
+                            rr.push(conn);
+                        }
+                    }
+                    rr
                 }
             };
 
