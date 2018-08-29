@@ -44,7 +44,7 @@ args:
         value_name: MAPPING
         long: mapping
         takes_value: true
-        possible_values: [ "all", "onetoone" ]
+        possible_values: [ "all", "roundrobin" ]
     - threads:
         long: threads
         help: How many threads we should use to process requests.
@@ -64,7 +64,7 @@ args:
     - socketmapping:
         long: socketmapping
         help: How sockets are distributed to threads (all = every thread polls all socket, onetoone = one thread handles one socket).
-        possible_values: [ "all", "onetoone" ]
+        possible_values: [ "all", "roundrobin" ]
         takes_value: true
     - sockets:
         long: sockets

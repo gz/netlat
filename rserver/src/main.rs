@@ -452,10 +452,8 @@ fn main() {
             let ts_state = ts_state.clone();
             let connections_to_handle = match config.socketmapping {
                 SocketMapping::All => raw_connections.clone(),
-                SocketMapping::OneToOne => {
-                    // If every core gets just one socket we should have as many sockets as cores
-                    assert!(config.threads == config.sockets);
-                    vec![raw_connections[idx].clone()]
+                SocketMapping::RoundRobin => {
+                    vec![raw_connections[idx % raw_connections.len()].clone()]
                 }
             };
 

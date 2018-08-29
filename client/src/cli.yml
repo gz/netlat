@@ -44,7 +44,7 @@ args:
         value_name: MAPPING
         long: mapping
         takes_value: true
-        possible_values: [ "all", "onetoone" ]
+        possible_values: [ "all", "roundrobin" ]
     - scheduler:
         long: scheduler
         help: Run as real time process.

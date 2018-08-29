@@ -65,14 +65,14 @@ pub enum Scheduler {
 pub enum ThreadMapping {
     /// Affinity for each thread to run on all provided CPUs
     All,
-    /// Assign threads invididually to CPUs in round-robin fashion
-    OneToOne,
+    /// Assign threads round-robin to CPUs (may overprovision CPUs in case threads < CPU)
+    RoundRobin,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize)]
 pub enum SocketMapping {
     All,
-    OneToOne,
+    RoundRobin,
 }
 
 #[derive(Debug, Clone)]
@@ -106,9 +106,9 @@ impl AppConfig {
         let threads = value_t!(matches, "threads", usize).unwrap_or(1);
         let sockets = value_t!(matches, "sockets", usize).unwrap_or(1);
 
-        let socketmapping = match matches.value_of("socketmapping").unwrap_or("onetoone") {
+        let socketmapping = match matches.value_of("socketmapping").unwrap_or("all") {
             "all" => SocketMapping::All,
-            "onetoone" => SocketMapping::OneToOne,
+            "roundrobin" => SocketMapping::RoundRobin,
             _ => unreachable!(
                 "Invalid CLI argument, may be clap bug if possible_values doesn't work?"
             ),
@@ -116,7 +116,7 @@ impl AppConfig {
 
         let mapping = match matches.value_of("mapping").unwrap_or("all") {
             "all" => ThreadMapping::All,
-            "onetoone" => ThreadMapping::OneToOne,
+            "roundrobin" => ThreadMapping::RoundRobin,
             _ => unreachable!(
                 "Invalid CLI argument, may be clap bug if possible_values doesn't work?"
             ),
@@ -404,7 +404,7 @@ pub fn set_process_name(name: &str) {
 pub fn set_thread_affinity(config: &AppConfig, thread_id: usize) -> Vec<usize> {
     let pin_to = match config.mapping {
         ThreadMapping::All => config.core_ids.clone(),
-        ThreadMapping::OneToOne => vec![config.core_ids[thread_id % config.core_ids.len()]],
+        ThreadMapping::RoundRobin => vec![config.core_ids[thread_id % config.core_ids.len()]],
     };
     pin_thread(&pin_to);
     pin_to
