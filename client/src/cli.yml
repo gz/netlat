@@ -55,9 +55,10 @@ args:
         help: How many requests to send.
         takes_value: true
         required: false
-    - flood:
-        help: Don't wait for replies (open loop).
-        long: flood
+    - rate:
+        help: Don't wait for replies (send every X ns).
+        long: rate
+        takes_value: true
         required: false
     - destinations:
         help: Send to these addr:port pairs (one thread is created for every specified pair).

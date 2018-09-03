@@ -95,7 +95,7 @@ pub struct AppConfig {
     // Client
     pub requests: usize,
     pub destinations: Vec<String>,
-    pub flood: bool,
+    pub rate: Option<u128>,
 }
 
 impl AppConfig {
@@ -150,7 +150,7 @@ impl AppConfig {
         let requests = value_t!(matches, "requests", usize).unwrap_or(250000);
         let destinations = values_t!(matches, "destinations", String)
             .unwrap_or(vec![String::from("192.168.0.7:3400")]);
-        let flood_mode = matches.is_present("flood");
+        let rate = value_t!(matches, "rate", u128).ok();
         let port = value_t!(matches, "port", u16).unwrap_or(3400);
 
         AppConfig {
@@ -170,7 +170,7 @@ impl AppConfig {
 
             requests: requests,
             destinations: destinations,
-            flood: flood_mode,
+            rate: rate,
         }
     }
 }

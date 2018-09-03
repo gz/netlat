@@ -140,8 +140,8 @@ fn network_loop(
     wtr: Arc<Mutex<csv::Writer<std::fs::File>>>,
 ) {
     println!(
-        "Sending {} requests to {:?} (flood = {})",
-        config.requests, connection, config.flood
+        "Sending {} requests to {:?} (rate = {:?})",
+        config.requests, connection, config.rate
     );
 
     let poll = mio::Poll::new().expect("Can't create poll.");
@@ -173,13 +173,24 @@ fn network_loop(
     barrier.wait();
     debug!("Start sending...");
     loop {
-        poll.poll(&mut events, Some(Duration::from_millis(1000)))
-            .expect("Can't poll channel");
+        poll.poll(
+            &mut events,
+            Some(Duration::from_nanos(
+                (config.rate.unwrap_or(100_000_000u128) + 100) as u64,
+            )),
+        ).expect("Can't poll channel");
         //debug!("events is = {:?}", events);
+        let flood = config.rate.is_some();
+
+        let last_sent_elapsed = last_sent.elapsed();
+        assert_eq!(last_sent_elapsed.as_secs(), 0);
+        let mut send_next: bool = flood
+            && last_sent_elapsed.subsec_nanos() >= config.rate.unwrap_or(u128::max_value()) as u32;
+
         for event in events.iter() {
             debug!("Got {:?}", event);
             // Send a packet
-            if (state_machine == HandlerState::SendPacket || config.flood)
+            if ((config.rate.is_none() && state_machine == HandlerState::SendPacket) || send_next)
                 && event.readiness().is_writable()
             {
                 let packet_id = request_id.fetch_add(1, Ordering::SeqCst) as u64;
@@ -210,11 +221,12 @@ fn network_loop(
                 message_state.insert(packet_id, MessageState::new(packet_id, tx_app));
 
                 state_machine = HandlerState::WaitForReply;
+                send_next = false;
                 debug!("Sent packet {}", packet_id);
             }
 
             if
-            //(state_machine == HandlerState::ReadSentTimestamp || config.flood) &&
+            //(state_machine == HandlerState::ReadSentTimestamp || flood) &&
             mio::unix::UnixReady::from(event.readiness()).is_error() {
                 loop {
                     let (id, tx_nic) = match retrieve_tx_timestamp(raw_fd, &mut time_tx, &config) {
@@ -252,7 +264,7 @@ fn network_loop(
             }
 
             // Receive a packet
-            if (state_machine == HandlerState::WaitForReply || config.flood)
+            if (state_machine == HandlerState::WaitForReply || flood)
                 && event.readiness().is_readable()
             {
                 loop {
@@ -313,12 +325,13 @@ fn network_loop(
         }
 
         // Reregister for events
-        let opts = if state_machine == HandlerState::SendPacket {
-            debug!("need to send packet, register for writing");
-            Ready::writable() | Ready::readable() | UnixReady::error()
-        } else {
-            Ready::readable() | UnixReady::error()
-        };
+        let opts =
+            if (config.rate.is_none() && state_machine == HandlerState::SendPacket) || send_next {
+                debug!("need to send packet, register for writing");
+                Ready::writable() | Ready::readable() | UnixReady::error()
+            } else {
+                Ready::readable() | UnixReady::error()
+            };
 
         // One-shot means we re-register every time we got an event.
         poll.reregister(

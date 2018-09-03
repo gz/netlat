@@ -58,6 +58,11 @@ cargo run --release -- --iface enp216s0f1 --output test --pin 14 15 16 17 18 19 
 
 
 
+RUST_LOG='netlat=debug' cargo run -- --iface enp216s0f1 --output test --pin 14 15 16 17 18 19 20 21 22 23 24 25 26 27 --rate 1000 --scheduler default --timestamp hardware --transport udp 10 192.168.0.34:3400
+
+cargo run --release -- --iface enp216s0f1 --output test --pin 14 15 16 17 18 19 20 21 22 23 24 25 26 27 --rate 1000 --scheduler default --timestamp hardware --transport udp 10 192.168.0.34:3400
+
+
 ```
 
 Use `cargo run --release -- --help` for more information.
