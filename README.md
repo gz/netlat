@@ -22,6 +22,12 @@ cd rserver
 
 RUST_LOG='rserver=debug' cargo run -- --iface enp216s0f1 --output test --pin 1 2 3 4 --scheduler default --timestamp hardware --transport udp --port 3400 --threads 4 --mapping all --sockets 1 --socketmapping all mt
 
+RUST_LOG='rserver=debug' cargo run -- --iface enp216s0f1 --output test --scheduler default --timestamp hardware --transport udp --port 3400 --threads 1 --mapping all --sockets 1 --socketmapping all mt
+
+
+
+RUST_LOG='rserver=debug' cargo run -- --iface enp216s0f1 --output test --scheduler default --timestamp hardware --transport udp --port 3400 --threads 1 --mapping all --sockets 1 --socketmapping all mt
+
 
 # No debug
 

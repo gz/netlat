@@ -47,6 +47,8 @@ pub enum PacketTimestamp {
     None,
     Software,
     Hardware,
+    // Rx path only (for libvma)
+    HardwareRx,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize)]
@@ -124,6 +126,7 @@ impl AppConfig {
 
         let timestamp = match matches.value_of("timestamp").unwrap_or("hardware") {
             "hardware" => PacketTimestamp::Hardware,
+            "hardwarerx" => PacketTimestamp::HardwareRx,
             "software" => PacketTimestamp::Software,
             "none" => PacketTimestamp::None,
             _ => unreachable!(
@@ -179,7 +182,7 @@ extern "C" {
     /// Given an interface name (i.e., ifconfig name), return its IP address (we implicitly look for an AF_INET; IPv4 address).
     pub fn getifaceaddr(interface: *const libc::c_char) -> socket::sockaddr;
     /// Enable timestamping on the socket and for the given interface.
-    fn enable_hwtstamp(sock: i32, interface: *const libc::c_char, hw: bool) -> i32;
+    fn enable_hwtstamp(sock: i32, interface: *const libc::c_char, hw: bool, rxonly: bool) -> i32;
 }
 
 unsafe fn enable_packet_timestamps(
@@ -190,7 +193,12 @@ unsafe fn enable_packet_timestamps(
     if method == PacketTimestamp::None {
         return 0;
     }
-    enable_hwtstamp(sock, interface, method == PacketTimestamp::Hardware)
+    enable_hwtstamp(
+        sock,
+        interface,
+        method == PacketTimestamp::Hardware || method == PacketTimestamp::HardwareRx,
+        method == PacketTimestamp::HardwareRx,
+    )
 }
 
 /// A record that logs timestamps for every sent packet.
@@ -283,19 +291,26 @@ pub fn retrieve_tx_timestamp(
 #[cfg(target_os = "linux")]
 pub fn read_nic_timestamp(msg: &socket::RecvMsg, method: PacketTimestamp) -> u64 {
     match method {
-        PacketTimestamp::Hardware | PacketTimestamp::Software => {
+        PacketTimestamp::Hardware | PacketTimestamp::HardwareRx | PacketTimestamp::Software => {
             for cmsg in msg.cmsgs() {
                 match cmsg {
                     socket::ControlMessage::ScmTimestamping(timestamps) => {
-                        let ts = if method == PacketTimestamp::Hardware {
+                        let ts = if method == PacketTimestamp::Hardware
+                            || method == PacketTimestamp::HardwareRx
+                        {
                             timestamps[2]
                         } else {
                             timestamps[0]
                         };
-
                         let tstp = rstimespec_to_ns(ts);
                         assert!(tstp != 0);
                         return tstp;
+                    }
+                    socket::ControlMessage::Unknown(a) => {
+                        error!("Got Unknown ControlMessage on RX path cmsg_len = {:?} cmsg_level = {:?} cmsg_type = {:?}!", a.0.cmsg_len, a.0.cmsg_level, a.0.cmsg_type);
+                        for b in a.1 {
+                            error!("b = {}", b);
+                        }
                     }
                     _ => panic!("Got Unexpected ControlMessage on RX path!"),
                 }

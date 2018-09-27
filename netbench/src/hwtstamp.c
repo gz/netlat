@@ -39,7 +39,7 @@ struct sockaddr getifaceaddr(char *interface)
 /**
  * \brief Enables HW Timestamping mechanism on the NIC and for the socket
  **/
-int enable_hwtstamp(int sock, char *interface, bool hw)
+int enable_hwtstamp(int sock, char *interface, bool hw, bool rxonly)
 {
 #if __linux
     struct ifreq hwtstamp;
@@ -66,14 +66,16 @@ int enable_hwtstamp(int sock, char *interface, bool hw)
         else
         {
             so_timestamping_flags |= SOF_TIMESTAMPING_RAW_HARDWARE;
-            so_timestamping_flags |= SOF_TIMESTAMPING_TX_HARDWARE;
+            if (!rxonly)
+                so_timestamping_flags |= SOF_TIMESTAMPING_TX_HARDWARE;
             so_timestamping_flags |= SOF_TIMESTAMPING_RX_HARDWARE;
         }
     }
     else
     {
         so_timestamping_flags |= SOF_TIMESTAMPING_SOFTWARE;
-        so_timestamping_flags |= SOF_TIMESTAMPING_TX_SOFTWARE;
+        if (!rxonly)
+            so_timestamping_flags |= SOF_TIMESTAMPING_TX_SOFTWARE;
         so_timestamping_flags |= SOF_TIMESTAMPING_RX_SOFTWARE;
     }
 
@@ -93,12 +95,12 @@ int enable_hwtstamp(int sock, char *interface, bool hw)
         return -2;
     }
 
-    // request IP_PKTINFO for debugging purposes
+    /* request IP_PKTINFO for debugging purposes
     int enabled = 1;
     if (setsockopt(sock, SOL_IP, IP_PKTINFO, &enabled, sizeof(enabled)) < 0)
     {
         return -3;
-    }
+    }*/
 #else
     printf("Platform not supported, no timestamping!\n");
 #endif

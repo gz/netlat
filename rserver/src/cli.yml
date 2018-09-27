@@ -25,7 +25,7 @@ args:
         requires: iface
         value_name: METHOD
         takes_value: true
-        possible_values: [ "hardware", "software", "none" ]
+        possible_values: [ "hardware", "software", "none", "hardwarerx" ]
     - iface:
         help: Which interface the client should use (see ifconfig).
         long: iface

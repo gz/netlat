@@ -110,7 +110,9 @@ fn network_loop(
             //let raw_fd: RawFd = *connections[event.token().0].lock().unwrap();
             let raw_fd: RawFd = connections[event.token().0];
 
-            if UnixReady::from(event.readiness()).is_error() {
+            if UnixReady::from(event.readiness()).is_error()
+                && config.timestamp != PacketTimestamp::HardwareRx
+            {
                 loop {
                     let (id, tx_nic) = match retrieve_tx_timestamp(raw_fd, &mut time_tx, config) {
                         Ok(data) => data,
@@ -268,7 +270,16 @@ fn network_loop(
 
                     debug!("Sent reply for id={}", st.log.id);
                     assert_eq!(bytes_sent, 8);
-                    ts_state.insert(st.log.id, st);
+
+                    if config.timestamp == PacketTimestamp::HardwareRx {
+                        // TX timestamps aren't supported lets log immediately
+                        st.log.tx_nic = 0;
+                        st.log.completed = true;
+                        let mut logfile = wtr.lock().unwrap();
+                        logfile.serialize(&st.log).expect("Can't write record.");
+                    } else {
+                        ts_state.insert(st.log.id, st);
+                    }
                 }
             }
 
