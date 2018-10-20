@@ -84,7 +84,8 @@ fn network_loop(
             mio::Token(idx),
             Ready::readable() | UnixReady::error(),
             mio::PollOpt::edge() | mio::PollOpt::oneshot(),
-        ).expect("Can't register events.");
+        )
+        .expect("Can't register events.");
     }
 
     let mut events = mio::Events::with_capacity(10);
@@ -197,6 +198,7 @@ fn network_loop(
                         }
                         logfile.flush().expect("Can't flush logfile");
                         info!("Min latency was {}", min_seen);
+                        return;
                     } else {
                         debug!("Storing packet in send_state");
                         let mst = MessageState::new(
@@ -298,7 +300,8 @@ fn network_loop(
                 mio::Token(event.token().0),
                 opts,
                 mio::PollOpt::edge() | mio::PollOpt::oneshot(),
-            ).expect("Can't re-register events.");
+            )
+            .expect("Can't re-register events.");
         }
     }
 }
@@ -352,7 +355,8 @@ fn _spawn_listen_pair(
             //let payload = rxa.recv().expect("Can't receive data on app thread.");
             //txa.send((payload, now()))
             //    .expect("Can't send data to network thread.");
-        }).expect("Can't spawn application thread");
+        })
+        .expect("Can't spawn application thread");
 
     let t_poll_name = String::from("rserver/polling");
     let t_poll = thread::Builder::new()
@@ -366,7 +370,8 @@ fn _spawn_listen_pair(
 
             //let channel = Some((txp, rxp));
             //network_loop(&(config.clone()), vec![], channel, logger)
-        }).expect("Couldn't spawn a thread");
+        })
+        .expect("Couldn't spawn a thread");
 
     handles.push((t_app, t_poll));
     handles
@@ -491,12 +496,13 @@ fn main() {
         for thread in threads.into_iter() {
             thread.join().expect("Can't wait for thread?");
         }
-    }
-
-    /*else if let Some(_) = matches.subcommand_matches("single") {
-        assert!(config.threads == 1);
-        set_thread_affinity(&config, 0);
+    } else if let Some(_) = matches.subcommand_matches("single") {
+        let pinned_to = set_thread_affinity(&config, 0);
         set_scheduling(&config);
-        network_loop(&config, raw_connections, None, logger);
-    }*/
+        info!(
+                        "Spawning network thread {} on cores {:?} scheduled as {:?} to handle connection(s) = {:?}",
+                        0, pinned_to, config.scheduler, raw_connections
+                    );
+        network_loop(&config, raw_connections, None, logger, send_state, ts_state);
+    }
 }
