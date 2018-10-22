@@ -161,7 +161,7 @@ fn network_loop(
                     };
 
                     if msg.bytes == 0 {
-                        // In TCP 0 means sender shut down the connection, we're done here.
+                        error!("Got 0 bytes, in TCP this means connection got shut-down");
                         return;
                     }
                     let rx_app = now();
@@ -227,7 +227,8 @@ fn network_loop(
                 let mut send_state = send_state[&raw_fd].lock().unwrap();
                 while send_state.len() > 0 {
                     let mut st = send_state.pop_front().expect("We need an item");
-                    assert!(config.transport != Transport::Tcp); // fix st.sock == raw_fd
+                    //assert!(config.transport != Transport::Tcp); // fix st.sock == raw_fd
+                    assert!(st.sock == raw_fd);
 
                     st.log.tx_app = now();
                     recv_buf.clear();
@@ -387,11 +388,15 @@ fn create_connections(config: &AppConfig, address: net::SocketAddrV4) -> Vec<Con
                 .set_nonblocking(false)
                 .expect("Can't unset nonblocking mode for listener");
             socket.bind(&address.into()).expect("Can't bind to address");
+            socket.listen(123).expect("Can't listen?");
             let listener = socket.into_tcp_listener();
 
             for _sock_id in 0..config.sockets {
                 let (stream, addr) = listener.accept().expect("Waiting for incoming connection");
-                info!("Incoming connection from {}", addr);
+                println!("Incoming connection from {}", addr);
+                stream
+                    .set_nonblocking(true)
+                    .expect("Can't set nonblocking for incoming connection");
                 timestamping_enable(config, stream.as_raw_fd());
                 connections.push(Connection::Stream(stream));
             }

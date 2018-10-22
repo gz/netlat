@@ -154,7 +154,8 @@ fn network_loop(
         PING,
         Ready::writable() | Ready::readable() | UnixReady::error(),
         mio::PollOpt::edge() | mio::PollOpt::oneshot(),
-    ).expect("Can't register events.");
+    )
+    .expect("Can't register events.");
 
     let mut packet_buffer = Vec::with_capacity(8);
     let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
@@ -178,7 +179,8 @@ fn network_loop(
             Some(Duration::from_nanos(
                 (config.rate.unwrap_or(100_000_000u128) + 100) as u64,
             )),
-        ).expect("Can't poll channel");
+        )
+        .expect("Can't poll channel");
         //debug!("events is = {:?}", events);
         let flood = config.rate.is_some();
 
@@ -339,7 +341,8 @@ fn network_loop(
             PING,
             opts,
             mio::PollOpt::edge() | mio::PollOpt::oneshot(),
-        ).expect("Can't re-register events.");
+        )
+        .expect("Can't re-register events.");
     }
 }
 
@@ -358,8 +361,14 @@ fn create_connections(config: &AppConfig, address: net::SocketAddrV4) -> Vec<Con
                     .parse()
                     .expect("Invalid host:port pair");
                 socket
+                    .set_nonblocking(false)
+                    .expect("Can't unset nonblocking mode");
+                socket
                     .connect(&destination_address.into())
                     .expect("Can't connect to address");
+                socket
+                    .set_nonblocking(true)
+                    .expect("Can't set nonblocking mode");
                 timestamping_enable(&config, socket.as_raw_fd());
                 connections.push(Connection::Stream(socket.into_tcp_stream()));
             }
