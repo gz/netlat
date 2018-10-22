@@ -280,6 +280,7 @@ fn network_loop(
                         st.log.completed = true;
                         let mut logfile = wtr.lock().unwrap();
                         logfile.serialize(&st.log).expect("Can't write record.");
+                        set_process_name(format!("pkt-{}", st.log.id + 1).as_str());
                     } else {
                         ts_state.insert(st.log.id, st);
                     }
