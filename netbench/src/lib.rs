@@ -359,7 +359,8 @@ pub fn create_writer(logfile: String, capacity: usize) -> Arc<Mutex<csv::Writer<
         let mut logfile = signal_wtr.lock().unwrap();
         logfile.flush().expect("Can't flush the csv log");
         std::process::exit(0);
-    }).expect("Error setting Ctrl-C handler");
+    })
+    .expect("Error setting Ctrl-C handler");
 
     wtr
 }
@@ -470,7 +471,8 @@ pub fn make_socket(config: &AppConfig) -> Socket {
     let socket = match config.transport {
         Transport::Tcp => Socket::new(Domain::ipv4(), Type::stream(), None),
         Transport::Udp => Socket::new(Domain::ipv4(), Type::dgram(), None),
-    }.expect("Can't create socket");
+    }
+    .expect("Can't create socket");
 
     if config.transport == Transport::Udp && config.sockets > 1 {
         debug!("Set socket reuse_port option");
