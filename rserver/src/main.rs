@@ -274,7 +274,9 @@ fn network_loop(
                     debug!("Sent reply for id={}", st.log.id);
                     assert_eq!(bytes_sent, 8);
 
-                    if config.timestamp == PacketTimestamp::HardwareRx {
+                    if config.timestamp == PacketTimestamp::HardwareRx
+                        || config.timestamp == PacketTimestamp::None
+                    {
                         // TX timestamps aren't supported lets log immediately
                         st.log.tx_nic = 0;
                         st.log.completed = true;
