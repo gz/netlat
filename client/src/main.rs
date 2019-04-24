@@ -132,6 +132,63 @@ fn recvmsg<'msg>(
     Ok((id, msg))
 }
 
+fn network_loop_rate(
+    config: AppConfig,
+    connection: Connection,
+    barrier: std::sync::Arc<std::sync::Barrier>,
+    request_id: Arc<AtomicUsize>,
+    wtr: Arc<Mutex<csv::Writer<std::fs::File>>>,
+) {
+    println!(
+        "Sending {} requests to {:?} (rate = {:?})",
+        config.requests, connection, config.rate
+    );
+    let raw_fd: std::os::unix::io::RawFd = connection.as_raw_fd();
+
+    let mut packet_buffer: Vec<u8> = Vec::with_capacity(1024);
+    let mut recv_buf: Vec<u8> = Vec::with_capacity(1024);
+    recv_buf.resize(1024, 0);
+    packet_buffer.resize(1024, 0);
+
+    let mut last_sent = Instant::now();
+    barrier.wait();
+
+    error!("Start sending...");
+    loop {
+        let flood = config.rate.is_some();
+        debug!("flood is = {:?}", flood);
+
+        while last_sent.elapsed().as_nanos() <= config.rate.unwrap() {
+            debug!("busy waiting {:?} {}", last_sent.elapsed().as_nanos(), config.rate.unwrap());
+        }
+        debug!("sending stuff");
+
+        let packet_id = request_id.fetch_add(1, Ordering::SeqCst) as u64;
+        if packet_id > config.requests as u64 {
+            error!("completed");
+            end_network_loop(&wtr, HashMap::new(), raw_fd, &config);
+            return;
+        }
+
+        packet_buffer
+            .as_mut_slice()
+            .write_u64::<BigEndian>(packet_id)
+            .expect("Serialize time");
+
+        let bytes_sent =
+            match socket::send(raw_fd, &packet_buffer, socket::MsgFlags::empty()) {
+                Ok(bytes_sent) => bytes_sent,
+                //Err(nix::Error::Sys(nix::errno::Errno::EAGAIN)) => break,
+                Err(e) => panic!("Unexpected error during socket::send {:?}", e),
+            };
+
+        assert_eq!(bytes_sent, 1024);
+        last_sent = Instant::now();
+        debug!("Sent packet {}", packet_id);
+    }
+}
+
+
 fn network_loop(
     config: AppConfig,
     connection: Connection,
@@ -157,9 +214,10 @@ fn network_loop(
     )
     .expect("Can't register events.");
 
-    let mut packet_buffer = Vec::with_capacity(8);
-    let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
-    recv_buf.resize(8, 0);
+    let mut packet_buffer: Vec<u8> = Vec::with_capacity(1024);
+    let mut recv_buf: Vec<u8> = Vec::with_capacity(1024);
+    recv_buf.resize(1024, 0);
+    packet_buffer.resize(1024, 0);
 
     let timeout = Duration::from_millis(2000); // After 2s we consider the packet lost
     let mut last_sent = Instant::now();
@@ -176,13 +234,12 @@ fn network_loop(
     loop {
         poll.poll(
             &mut events,
-            Some(Duration::from_nanos(
-                (config.rate.unwrap_or(100_000_000u128) + 100) as u64,
-            )),
+            Some(Duration::from_millis(1)),
         )
         .expect("Can't poll channel");
-        //debug!("events is = {:?}", events);
+
         let flood = config.rate.is_some();
+        debug!("flood is = {:?}", flood);
 
         let last_sent_elapsed = last_sent.elapsed();
         assert_eq!(last_sent_elapsed.as_secs(), 0);
@@ -202,10 +259,11 @@ fn network_loop(
                 }
 
                 // Temporarily change process name (for better traceability with perf)
-                set_process_name(format!("pkt-{}", packet_id).as_str());
+                //if !flood { set_process_name(format!("pkt-{}", packet_id).as_str()); }
                 let tx_app = now();
 
                 packet_buffer
+                    .as_mut_slice()
                     .write_u64::<BigEndian>(packet_id)
                     .expect("Serialize time");
 
@@ -216,9 +274,10 @@ fn network_loop(
                         Err(e) => panic!("Unexpected error during socket::send {:?}", e),
                     };
 
-                assert_eq!(bytes_sent, 8);
-                packet_buffer.clear();
+                assert_eq!(bytes_sent, 1024);
+                //packet_buffer.clear();
                 last_sent = Instant::now();
+                //error!("sent at {:?}", last_sent);
 
                 message_state.insert(packet_id, MessageState::new(packet_id, tx_app));
 
@@ -228,7 +287,7 @@ fn network_loop(
             }
 
             if
-            //(state_machine == HandlerState::ReadSentTimestamp || flood) &&
+            (state_machine == HandlerState::ReadSentTimestamp || flood) &&
             mio::unix::UnixReady::from(event.readiness()).is_error() {
                 loop {
                     let (id, tx_nic) = match retrieve_tx_timestamp(raw_fd, &mut time_tx, &config) {
@@ -430,7 +489,12 @@ fn main() {
         handles.push(thread::spawn(move || {
             set_thread_affinity(&config, id);
             set_scheduling(&config);
-            network_loop(config, connection, barrier, request_id, wtr)
+            if config.rate.is_some() {
+                network_loop_rate(config, connection, barrier, request_id, wtr)
+            }
+            else {
+                network_loop(config, connection, barrier, request_id, wtr)
+            }
         }));
     }
 
@@ -441,7 +505,7 @@ fn main() {
     /* else if connections.len() == 1 {
         set_thread_affinity(&config, 0);
         set_scheduling(&config);
-
+    
         for (destination, socket) in connections {
             let barrier = barrier.clone();
             let config = config.clone();
