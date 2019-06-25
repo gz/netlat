@@ -16,3 +16,6 @@ mio = "*"
 byteorder = "*"
 libc = "*"
 
+[features]
+default = ["processor-trace"]
+processor-trace = []

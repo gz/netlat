@@ -101,8 +101,11 @@ fn network_loop(
     // If this fails think about allocating it on the heap instead of copy?
     assert!(std::mem::size_of::<MessageState>() < 256);
 
-    debug!("Set process name to {}", format!("pkt-{}", 1));
-    set_process_name(format!("pkt-{}", 1).as_str());
+    #[cfg(feature = "processor-trace")]
+    {
+        debug!("Set process name to {}", format!("pkt-{}", 1));
+        set_process_name(format!("pkt-{}", 1).as_str());
+    }
 
     loop {
         poll.poll(&mut events, None).expect("Can't poll channel");
@@ -139,8 +142,11 @@ fn network_loop(
                         },
                     );
 
-                    debug!("Set process name to {}", format!("pkt-{}", id + 1));
-                    set_process_name(format!("pkt-{}", id + 1).as_str());
+                    #[cfg(feature = "processor-trace")]
+                    {
+                        debug!("Set process name to {}", format!("pkt-{}", id + 1));
+                        set_process_name(format!("pkt-{}", id + 1).as_str());
+                    }
                 }
             }
 
@@ -282,7 +288,10 @@ fn network_loop(
                         st.log.completed = true;
                         let mut logfile = wtr.lock().unwrap();
                         logfile.serialize(&st.log).expect("Can't write record.");
-                        set_process_name(format!("pkt-{}", st.log.id + 1).as_str());
+                        #[cfg(feature = "processor-trace")]
+                        {
+                            set_process_name(format!("pkt-{}", st.log.id + 1).as_str());
+                        }
                     } else {
                         ts_state.insert(st.log.id, st);
                     }

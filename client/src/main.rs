@@ -159,7 +159,11 @@ fn network_loop_rate(
         debug!("flood is = {:?}", flood);
 
         while last_sent.elapsed().as_nanos() <= config.rate.unwrap() {
-            debug!("busy waiting {:?} {}", last_sent.elapsed().as_nanos(), config.rate.unwrap());
+            debug!(
+                "busy waiting {:?} {}",
+                last_sent.elapsed().as_nanos(),
+                config.rate.unwrap()
+            );
         }
         debug!("sending stuff");
 
@@ -175,19 +179,17 @@ fn network_loop_rate(
             .write_u64::<BigEndian>(packet_id)
             .expect("Serialize time");
 
-        let bytes_sent =
-            match socket::send(raw_fd, &packet_buffer, socket::MsgFlags::empty()) {
-                Ok(bytes_sent) => bytes_sent,
-                //Err(nix::Error::Sys(nix::errno::Errno::EAGAIN)) => break,
-                Err(e) => panic!("Unexpected error during socket::send {:?}", e),
-            };
+        let bytes_sent = match socket::send(raw_fd, &packet_buffer, socket::MsgFlags::empty()) {
+            Ok(bytes_sent) => bytes_sent,
+            //Err(nix::Error::Sys(nix::errno::Errno::EAGAIN)) => break,
+            Err(e) => panic!("Unexpected error during socket::send {:?}", e),
+        };
 
         assert_eq!(bytes_sent, 1024);
         last_sent = Instant::now();
         debug!("Sent packet {}", packet_id);
     }
 }
-
 
 fn network_loop(
     config: AppConfig,
@@ -232,11 +234,8 @@ fn network_loop(
     barrier.wait();
     debug!("Start sending...");
     loop {
-        poll.poll(
-            &mut events,
-            Some(Duration::from_millis(1)),
-        )
-        .expect("Can't poll channel");
+        poll.poll(&mut events, Some(Duration::from_millis(1)))
+            .expect("Can't poll channel");
 
         let flood = config.rate.is_some();
         debug!("flood is = {:?}", flood);
@@ -286,9 +285,9 @@ fn network_loop(
                 debug!("Sent packet {}", packet_id);
             }
 
-            if
-            (state_machine == HandlerState::ReadSentTimestamp || flood) &&
-            mio::unix::UnixReady::from(event.readiness()).is_error() {
+            if (state_machine == HandlerState::ReadSentTimestamp || flood)
+                && mio::unix::UnixReady::from(event.readiness()).is_error()
+            {
                 loop {
                     let (id, tx_nic) = match retrieve_tx_timestamp(raw_fd, &mut time_tx, &config) {
                         Ok(data) => data,
@@ -342,7 +341,7 @@ fn network_loop(
                             .get_mut(&id)
                             .expect("Can't find state for incoming packet");
                         mst.log.rx_app = now();
-                        set_process_name("netbench");
+                        //set_process_name("netbench");
                         mst.set_rx_nic(read_nic_timestamp(&msg, config.timestamp));
                         // Sanity check that we measure the packet we sent...
                         assert!(id == mst.log.id);
@@ -491,8 +490,7 @@ fn main() {
             set_scheduling(&config);
             if config.rate.is_some() {
                 network_loop_rate(config, connection, barrier, request_id, wtr)
-            }
-            else {
+            } else {
                 network_loop(config, connection, barrier, request_id, wtr)
             }
         }));
@@ -505,7 +503,6 @@ fn main() {
     /* else if connections.len() == 1 {
         set_thread_affinity(&config, 0);
         set_scheduling(&config);
-    
         for (destination, socket) in connections {
             let barrier = barrier.clone();
             let config = config.clone();
