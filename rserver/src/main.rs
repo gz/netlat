@@ -62,7 +62,7 @@ impl MessageState {
     }
 
     fn linux_rx_latency(&self) -> u64 {
-        (self.log.rx_app + 36 * 1_000_000_000) - self.log.rx_nic
+        (self.log.rx_app + 37 * 1_000_000_000) - self.log.rx_nic
     }
 }
 

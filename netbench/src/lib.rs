@@ -269,10 +269,10 @@ pub fn retrieve_tx_timestamp(
         socket::MsgFlags::MSG_ERRQUEUE,
     ));
 
-    let payload_id = recv_buf[pkt_size - 8..]
-        .as_ref()
-        .read_u64::<BigEndian>()
-        .expect("Can't read ID?");
+    use std::io::Cursor;
+
+    let mut s: &[u8] = recv_buf[pkt_size - 8..].as_ref();
+    let payload_id = s.read_u64::<BigEndian>().expect("Can't read ID?");
 
     Ok((payload_id, read_nic_timestamp(&msg, config.timestamp)))
 }
