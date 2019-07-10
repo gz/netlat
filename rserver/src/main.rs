@@ -62,7 +62,7 @@ impl MessageState {
     }
 
     fn linux_rx_latency(&self) -> u64 {
-        (self.log.rx_app + 36 * 1_000_000_000) - self.log.rx_nic
+        (self.log.rx_app + 37 * 1_000_000_000) - self.log.rx_nic
     }
 }
 
@@ -125,7 +125,19 @@ fn network_loop(
                     let mut ts_state = ts_state.lock().unwrap();
                     ts_state.remove(&id).map_or_else(
                         || {
-                            panic!("Packet state for id {} not found?", id);
+                            debug!(
+                                "Packet state for id {} not found, we have a retransmission here",
+                                id
+                            );
+
+                            let mut logentry: netbench::LogRecord = Default::default();
+                            logentry.id = id;
+                            logentry.tx_nic = tx_nic;
+                            logentry.retransmission = true;
+
+                            // Log all the timestamps
+                            let mut logfile = wtr.lock().unwrap();
+                            logfile.serialize(&logentry).expect("Can't write record.");
                         },
                         |mut st| {
                             debug!("Reading timestamp");

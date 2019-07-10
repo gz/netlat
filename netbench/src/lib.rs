@@ -222,8 +222,10 @@ pub struct LogRecord {
     pub tx_nic: u64,
     /// Time received at the HT in case `smt` mode is used in rserver (otherwise 0)
     pub rx_ht: u64,
-    /// Packet was sueccessfully handled by the application
+    /// Packet was successfully handled by the application
     pub completed: bool,
+    /// Packet was dropped and we had to send a retransmission at `tx_nic`
+    pub retransmission: bool,
 }
 
 /// Transform timespec to nanoseconds.
