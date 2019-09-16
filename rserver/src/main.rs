@@ -164,7 +164,7 @@ fn network_loop(
                         error!("Got 0 bytes, in TCP this means connection got shut-down");
                         return;
                     }
-                    let rx_app = now();
+                    let rx_app = recv_done();
                     assert_eq!(msg.bytes, 8, "Message payload got {} bytes", msg.bytes);
                     let mut packet_id = recv_buf
                         .as_slice()
@@ -230,7 +230,7 @@ fn network_loop(
                     //assert!(config.transport != Transport::Tcp); // fix st.sock == raw_fd
                     assert!(st.sock == raw_fd);
 
-                    st.log.tx_app = now();
+                    st.log.tx_app = send_done();
                     recv_buf.clear();
                     recv_buf
                         .write_u64::<BigEndian>(st.log.id)

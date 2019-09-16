@@ -203,7 +203,7 @@ fn network_loop(
 
                 // Temporarily change process name (for better traceability with perf)
                 set_process_name(format!("pkt-{}", packet_id).as_str());
-                let tx_app = now();
+                let tx_app = send_done();
 
                 packet_buffer
                     .write_u64::<BigEndian>(packet_id)
@@ -283,7 +283,7 @@ fn network_loop(
                         let mut mst = message_state
                             .get_mut(&id)
                             .expect("Can't find state for incoming packet");
-                        mst.log.rx_app = now();
+                        mst.log.rx_app = send_done();
                         set_process_name("netbench");
                         mst.set_rx_nic(read_nic_timestamp(&msg, config.timestamp));
                         // Sanity check that we measure the packet we sent...

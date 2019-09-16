@@ -341,6 +341,18 @@ pub fn now() -> u64 {
     timespec_to_ns(ts)
 }
 
+/// Add two methods to make it easier to differentiate between send/recv
+/// Makes it easier to track when something is finished as it can still be confused
+/// when there are multile netbench::now() calls
+pub fn recv_done() -> u64 {
+    now()
+}
+
+pub fn send_done() -> u64 {
+    now()
+}
+
+
 /// Makes a new CSV writer to log the results. We register an abort handler
 /// to flush the records out since the csv::Writer has some internal buffering
 /// that is not flushed in case we stop the process with SIGINT or SIGTERM.
