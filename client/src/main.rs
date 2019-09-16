@@ -223,7 +223,8 @@ fn network_loop(
                 message_state.insert(packet_id, MessageState::new(packet_id, tx_app));
 
                 state_machine = HandlerState::WaitForReply;
-                send_next = false;
+                send_next = flood
+                        && last_sent_elapsed.subsec_nanos() >= config.rate.unwrap_or(u128::max_value()) as u32;
                 debug!("Sent packet {}", packet_id);
             }
 
