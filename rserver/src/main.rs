@@ -102,7 +102,7 @@ fn network_loop(
     assert!(std::mem::size_of::<MessageState>() < 256);
 
     debug!("Set process name to {}", format!("pkt-{}", 1));
-    set_process_name(format!("pkt-{}", 1).as_str());
+    set_process_name("pkt");
 
     loop {
         poll.poll(&mut events, None).expect("Can't poll channel");
@@ -139,8 +139,8 @@ fn network_loop(
                         },
                     );
 
-                    debug!("Set process name to {}", format!("pkt-{}", id + 1));
-                    set_process_name(format!("pkt-{}", id + 1).as_str());
+                    //debug!("Set process name to {}", format!("pkt-{}", id + 1));
+                    //set_process_name(format!("pkt-{}", id + 1).as_str());
                 }
             }
 
@@ -282,7 +282,7 @@ fn network_loop(
                         st.log.completed = true;
                         let mut logfile = wtr.lock().unwrap();
                         logfile.serialize(&st.log).expect("Can't write record.");
-                        set_process_name(format!("pkt-{}", st.log.id + 1).as_str());
+                        //set_process_name(format!("pkt-{}", st.log.id + 1).as_str());
                     } else {
                         ts_state.insert(st.log.id, st);
                     }
