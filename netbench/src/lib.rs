@@ -348,8 +348,12 @@ pub fn recv_done() -> u64 {
     now()
 }
 
+/// This one different on purpose! Otherwise it is optimized to the same symbol
+#[allow(unused_assignments)]
 pub fn send_done() -> u64 {
-    now()
+    let mut tx_app = 1;
+    tx_app = now();
+    tx_app
 }
 
 
