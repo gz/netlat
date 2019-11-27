@@ -71,6 +71,9 @@ args:
         help: How many sockets to create (UDP), how many connections to accept (TCP).
         value_name: SOCKET_COUNT
         takes_value: true
+    - noreply:
+        long: noreply
+        help: Don't send reply packets.
 
 subcommands:
     - smt:

@@ -91,6 +91,8 @@ pub struct AppConfig {
     pub timestamp: PacketTimestamp,
     pub transport: Transport,
 
+    pub noreply: bool,
+
     // Server
     pub port: u16,
 
@@ -150,6 +152,8 @@ impl AppConfig {
             ),
         };
 
+        let noreply = matches.is_present("noreply");
+
         let requests = value_t!(matches, "requests", usize).unwrap_or(250000);
         let destinations = values_t!(matches, "destinations", String)
             .unwrap_or(vec![String::from("192.168.0.7:3400")]);
@@ -158,22 +162,23 @@ impl AppConfig {
 
         AppConfig {
             interface: iface,
-            output: output,
-            core_ids: core_ids,
-            threads: threads,
-            mapping: mapping,
-            sockets: sockets,
-            socketmapping: socketmapping,
+            output,
+            core_ids,
+            threads,
+            mapping,
+            sockets,
+            socketmapping,
 
-            scheduler: scheduler,
-            timestamp: timestamp,
-            transport: transport,
+            scheduler,
+            timestamp,
+            transport,
+            noreply,
 
-            port: port,
+            port,
 
-            requests: requests,
-            destinations: destinations,
-            rate: rate,
+            requests,
+            destinations,
+            rate,
         }
     }
 }
@@ -355,7 +360,6 @@ pub fn send_done() -> u64 {
     tx_app = now();
     tx_app
 }
-
 
 /// Makes a new CSV writer to log the results. We register an abort handler
 /// to flush the records out since the csv::Writer has some internal buffering

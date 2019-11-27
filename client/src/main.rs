@@ -202,7 +202,7 @@ fn network_loop(
                 }
 
                 // Temporarily change process name (for better traceability with perf)
-                set_process_name(format!("pkt-{}", packet_id).as_str());
+                //set_process_name(format!("pkt-{}", packet_id).as_str());
                 let tx_app = send_done();
 
                 packet_buffer
@@ -224,7 +224,8 @@ fn network_loop(
 
                 state_machine = HandlerState::WaitForReply;
                 send_next = flood
-                        && last_sent_elapsed.subsec_nanos() >= config.rate.unwrap_or(u128::max_value()) as u32;
+                    && last_sent_elapsed.subsec_nanos()
+                        >= config.rate.unwrap_or(u128::max_value()) as u32;
                 debug!("Sent packet {}", packet_id);
             }
 
@@ -248,7 +249,7 @@ fn network_loop(
                         mst.complete(config.timestamp)
                     };
 
-                    if completed_record {
+                    if completed_record || config.noreply {
                         let mut mst = message_state
                             .remove(&id)
                             .expect("Can't remove completed packet");
@@ -267,7 +268,8 @@ fn network_loop(
             }
 
             // Receive a packet
-            if (state_machine == HandlerState::WaitForReply || flood)
+            if !config.noreply
+                && (state_machine == HandlerState::WaitForReply || flood)
                 && event.readiness().is_readable()
             {
                 loop {
@@ -284,7 +286,7 @@ fn network_loop(
                             .get_mut(&id)
                             .expect("Can't find state for incoming packet");
                         mst.log.rx_app = send_done();
-                        set_process_name("netbench");
+                        //set_process_name("netbench");
                         mst.set_rx_nic(read_nic_timestamp(&msg, config.timestamp));
                         // Sanity check that we measure the packet we sent...
                         assert!(id == mst.log.id);

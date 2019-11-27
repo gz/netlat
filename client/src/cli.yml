@@ -65,3 +65,7 @@ args:
         multiple: true
         takes_value: true
         required: false
+    - noreply:
+        long: noreply
+        help: Don't expect reply packets.
+        requires: rate

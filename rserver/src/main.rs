@@ -108,7 +108,6 @@ fn network_loop(
         poll.poll(&mut events, None).expect("Can't poll channel");
         for event in events.iter() {
             debug!("event = {:?}", event);
-            //let raw_fd: RawFd = *connections[event.token().0].lock().unwrap();
             let raw_fd: RawFd = connections[event.token().0];
 
             if UnixReady::from(event.readiness()).is_error()
@@ -138,9 +137,6 @@ fn network_loop(
                             logfile.serialize(&st.log).expect("Can't write record.");
                         },
                     );
-
-                    //debug!("Set process name to {}", format!("pkt-{}", id + 1));
-                    //set_process_name(format!("pkt-{}", id + 1).as_str());
                 }
             }
 
@@ -215,15 +211,20 @@ fn network_loop(
                         if mst.linux_rx_latency() < min_seen {
                             min_seen = mst.linux_rx_latency();
                         }
-                        let mut send_state = send_state[&raw_fd].lock().unwrap();
-                        (*send_state).push_back(mst);
+
+                        if config.noreply {
+                            let mut logfile = wtr.lock().unwrap();
+                            logfile.serialize(mst.log).expect("Can't write log record");
+                        } else {
+                            let mut send_state = send_state[&raw_fd].lock().unwrap();
+                            (*send_state).push_back(mst);
+                        }
                     }
                 }
             }
 
             // Send a packet
-            // TODO: make sure we try to send the first time we receive something again
-            if event.readiness().is_writable() || !write_saw_egain {
+            if !config.noreply && (event.readiness().is_writable() || !write_saw_egain) {
                 let mut send_state = send_state[&raw_fd].lock().unwrap();
                 while send_state.len() > 0 {
                     let mut st = send_state.pop_front().expect("We need an item");
@@ -282,7 +283,6 @@ fn network_loop(
                         st.log.completed = true;
                         let mut logfile = wtr.lock().unwrap();
                         logfile.serialize(&st.log).expect("Can't write record.");
-                        //set_process_name(format!("pkt-{}", st.log.id + 1).as_str());
                     } else {
                         ts_state.insert(st.log.id, st);
                     }
@@ -291,7 +291,7 @@ fn network_loop(
 
             let send_state = send_state[&raw_fd].lock().unwrap();
             // Reregister for event on the FD
-            let opts = if send_state.len() == 0 {
+            let opts = if send_state.len() == 0 || config.noreply {
                 Ready::readable() | UnixReady::error()
             } else {
                 debug!("Unable to send everything, register for writable");
@@ -313,7 +313,7 @@ fn network_loop(
 fn _spawn_listen_pair(
     config: AppConfig,
     _connections: Vec<RawFd>,
-    logger: Arc<Mutex<csv::Writer<std::fs::File>>>,
+    _logger: Arc<Mutex<csv::Writer<std::fs::File>>>,
 ) -> Vec<(thread::JoinHandle<()>, thread::JoinHandle<()>)> {
     let on_core: Vec<(usize, usize)> = config.core_ids.iter().map(|c: &usize| {
         // Get the SMT threads for the Core
@@ -437,14 +437,6 @@ fn main() {
     );
 
     debug!("{:#?}", config);
-
-    /*if let Some(_) = matches.subcommand_matches("smt") {
-        let handles = spawn_listen_pair(config, connection, logger);
-        for (tapp, tpoll) in handles {
-            tapp.join().expect("Can't join app-thread.");
-            tpoll.join().expect("Can't join poll-thread.")
-        }
-    } */
 
     let mut threads = Vec::with_capacity(config.threads);
     let connections = create_connections(&config, address);
