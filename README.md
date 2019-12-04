@@ -19,7 +19,7 @@
 ```bash
 cd rserver
 
-RUST_LOG='netlat=debug' cargo run --bin rserver -- --iface enp94s0f0 --output test.log --pin 2 --scheduler default --sockets 1 --threads 1 --timestamp hardware --transport udp single
+RUST_LOG='netlat=debug' cargo run --release --bin rserver -- --iface enp94s0f0 --output test --pin 2 --scheduler default --sockets 1 --threads 1 --timestamp hardware --transport udp single
 ```
 
 Use `cargo run --release -- --help` for more information.
@@ -29,7 +29,7 @@ Use `cargo run --release -- --help` for more information.
 ```bash
 cd client
 
-RUST_LOG='netlat=debug' cargo run -- --iface enp94s0f0 --output test --pin 2 --scheduler default --timestamp hardware --transport udp 10 192.168.100.117:3400
+RUST_LOG='netlat=debug' cargo run --release -- --iface enp94s0f0 --output test --pin 2 --scheduler default --timestamp hardware --transport udp 10000 192.168.100.117:3400
 ```
 
 Use `cargo run --release -- --help` for more information.

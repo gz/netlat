@@ -92,6 +92,7 @@ pub struct AppConfig {
     pub transport: Transport,
 
     pub noreply: bool,
+    pub busyloop: bool,
 
     // Server
     pub port: u16,
@@ -153,6 +154,7 @@ impl AppConfig {
         };
 
         let noreply = matches.is_present("noreply");
+        let busyloop = matches.is_present("busyloop");
 
         let requests = value_t!(matches, "requests", usize).unwrap_or(250000);
         let destinations = values_t!(matches, "destinations", String)
@@ -168,14 +170,12 @@ impl AppConfig {
             mapping,
             sockets,
             socketmapping,
-
             scheduler,
             timestamp,
             transport,
             noreply,
-
+            busyloop,
             port,
-
             requests,
             destinations,
             rate,

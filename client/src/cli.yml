@@ -69,3 +69,7 @@ args:
         long: noreply
         help: Don't expect reply packets.
         requires: rate
+    - busyloop:
+        long: busyloop
+        help: Don't use epoll to wait for event until we send the next message (busy loop instead).
+        requires: rate

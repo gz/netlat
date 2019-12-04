@@ -149,13 +149,15 @@ fn network_loop(
 
     let raw_fd: std::os::unix::io::RawFd = connection.as_raw_fd();
 
-    poll.register(
-        &EventedFd(&raw_fd),
-        PING,
-        Ready::writable() | Ready::readable() | UnixReady::error(),
-        mio::PollOpt::edge() | mio::PollOpt::oneshot(),
-    )
-    .expect("Can't register events.");
+    if !config.busyloop {
+        poll.register(
+            &EventedFd(&raw_fd),
+            PING,
+            Ready::writable() | Ready::readable() | UnixReady::error(),
+            mio::PollOpt::edge() | mio::PollOpt::oneshot(),
+        )
+        .expect("Can't register events.");
+    }
 
     let mut packet_buffer = Vec::with_capacity(8);
     let mut recv_buf: Vec<u8> = Vec::with_capacity(8);
@@ -170,17 +172,26 @@ fn network_loop(
 
     // Packets inflight (in case flood is false, this should be size 1)
     let mut message_state: HashMap<u64, MessageState> = HashMap::with_capacity(1024);
+    let static_events = vec![mio::event::Event::new(
+        Ready::readable() | Ready::writable(),
+        mio::Token(0),
+    )];
 
     barrier.wait();
     debug!("Start sending...");
     loop {
-        poll.poll(
-            &mut events,
-            Some(Duration::from_nanos(
-                (config.rate.unwrap_or(100_000_000u128) + 100) as u64,
-            )),
-        )
-        .expect("Can't poll channel");
+        let event = if !config.busyloop {
+            poll.poll(
+                &mut events,
+                Some(Duration::from_nanos(
+                    (config.rate.unwrap_or(100_000_000u128) + 100) as u64,
+                )),
+            )
+            .expect("Can't poll channel");
+            events.iter().next().unwrap()
+        } else {
+            Some(static_events[0]).unwrap()
+        };
         //debug!("events is = {:?}", events);
         let flood = config.rate.is_some();
 
@@ -189,7 +200,7 @@ fn network_loop(
         let mut send_next: bool = flood
             && last_sent_elapsed.subsec_nanos() >= config.rate.unwrap_or(u128::max_value()) as u32;
 
-        for event in events.iter() {
+        for event in &[event] {
             debug!("Got {:?}", event);
             // Send a packet
             if ((config.rate.is_none() && state_machine == HandlerState::SendPacket) || send_next)
@@ -215,23 +226,31 @@ fn network_loop(
                         //Err(nix::Error::Sys(nix::errno::Errno::EAGAIN)) => break,
                         Err(e) => panic!("Unexpected error during socket::send {:?}", e),
                     };
+                send_next = flood
+                    && last_sent_elapsed.subsec_nanos()
+                        >= config.rate.unwrap_or(u128::max_value()) as u32;
 
                 assert_eq!(bytes_sent, 8);
                 packet_buffer.clear();
                 last_sent = Instant::now();
+                let mut mst = MessageState::new(packet_id, tx_app);
+                if config.timestamp == PacketTimestamp::None && config.noreply {
+                    mst.log.completed = true;
+                    log_packet(&wtr, &mst.log);
+                    state_machine = HandlerState::SendPacket;
+                } else {
+                    message_state.insert(packet_id, mst);
+                    state_machine = HandlerState::WaitForReply;
+                }
 
-                message_state.insert(packet_id, MessageState::new(packet_id, tx_app));
-
-                state_machine = HandlerState::WaitForReply;
-                send_next = flood
-                    && last_sent_elapsed.subsec_nanos()
-                        >= config.rate.unwrap_or(u128::max_value()) as u32;
                 debug!("Sent packet {}", packet_id);
             }
 
             if
             //(state_machine == HandlerState::ReadSentTimestamp || flood) &&
-            mio::unix::UnixReady::from(event.readiness()).is_error() {
+            config.timestamp != PacketTimestamp::None
+                && mio::unix::UnixReady::from(event.readiness()).is_error()
+            {
                 loop {
                     let (id, tx_nic) = match retrieve_tx_timestamp(raw_fd, &mut time_tx, &config) {
                         Ok(data) => data,
@@ -315,7 +334,10 @@ fn network_loop(
         }
 
         // Report error if we don't see a reply within 500ms and try again with another packet
-        if state_machine == HandlerState::WaitForReply && last_sent.elapsed() > timeout {
+        if config.timestamp != PacketTimestamp::None
+            && state_machine == HandlerState::WaitForReply
+            && last_sent.elapsed() > timeout
+        {
             error!("Not getting any replies?");
             // Make sure we read the timestamp of the dropped packet so error queue is clear again
             // I guess this is the proper way to do it...
@@ -330,22 +352,25 @@ fn network_loop(
         }
 
         // Reregister for events
-        let opts =
-            if (config.rate.is_none() && state_machine == HandlerState::SendPacket) || send_next {
+        if !config.busyloop {
+            let opts = if (config.rate.is_none() && state_machine == HandlerState::SendPacket)
+                || config.rate.is_some()
+            {
                 debug!("need to send packet, register for writing");
                 Ready::writable() | Ready::readable() | UnixReady::error()
             } else {
                 Ready::readable() | UnixReady::error()
             };
 
-        // One-shot means we re-register every time we got an event.
-        poll.reregister(
-            &EventedFd(&raw_fd),
-            PING,
-            opts,
-            mio::PollOpt::edge() | mio::PollOpt::oneshot(),
-        )
-        .expect("Can't re-register events.");
+            // One-shot means we re-register every time we got an event.
+            poll.reregister(
+                &EventedFd(&raw_fd),
+                PING,
+                opts,
+                mio::PollOpt::edge() | mio::PollOpt::oneshot(),
+            )
+            .expect("Can't re-register events.");
+        }
     }
 }
 
